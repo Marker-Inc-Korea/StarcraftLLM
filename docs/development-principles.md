@@ -5,3 +5,5 @@
 3. If Git credentials and the remote are available, finish a completed change by committing and pushing it to the default branch.
 4. Do not commit local automation, editor, machine, secret, or orchestration artifacts.
 5. Commit messages should describe the product change, not the tool used to make it.
+
+6. Prefer real-game integration over mock visuals when the user asks for StarCraft behavior; keep the mock only as a fast fallback/prototype.

@@ -12,14 +12,16 @@ coverage/
 .nyc_output/
 *.log
 
+# Python local env/cache
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
 # Local environment/secrets
 .env
 .env.*
 !.env.example
-
-# Local automation/orchestration artifacts
-.omx/
-.codex/
-.claude/
-AGENTS.md
-CLAUDE.md
