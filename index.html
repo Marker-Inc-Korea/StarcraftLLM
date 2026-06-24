@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>StarcraftLLM Unit Movement Prototype</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+      }
+      main {
+        width: min(960px, calc(100vw - 32px));
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+      p {
+        margin: 0 0 16px;
+        color: #9ca3af;
+      }
+      .panel {
+        display: grid;
+        grid-template-columns: 1fr 260px;
+        gap: 16px;
+        align-items: start;
+      }
+      canvas {
+        width: 100%;
+        height: auto;
+        border: 1px solid #374151;
+        border-radius: 12px;
+        background: #0f172a;
+        box-shadow: 0 20px 40px rgb(0 0 0 / 0.25);
+      }
+      aside {
+        padding: 16px;
+        border: 1px solid #374151;
+        border-radius: 12px;
+        background: #1f2937;
+      }
+      label {
+        display: block;
+        margin-bottom: 8px;
+        font-weight: 700;
+      }
+      input {
+        box-sizing: border-box;
+        width: 100%;
+        padding: 10px 12px;
+        border: 1px solid #4b5563;
+        border-radius: 8px;
+        background: #111827;
+        color: #e5e7eb;
+      }
+      button {
+        width: 100%;
+        margin-top: 10px;
+        padding: 10px 12px;
+        border: 0;
+        border-radius: 8px;
+        background: #22c55e;
+        color: #052e16;
+        font-weight: 800;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #4ade80;
+      }
+      code, output {
+        display: block;
+        margin-top: 12px;
+        padding: 10px;
+        border-radius: 8px;
+        background: #111827;
+        color: #bfdbfe;
+        font-size: 13px;
+        white-space: pre-wrap;
+      }
+      @media (max-width: 760px) {
+        .panel {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>StarcraftLLM: 유닛 이동 최소 프로토타입</h1>
+      <p>캔버스를 클릭하거나 명령어를 입력하면 유닛이 해당 위치로 이동합니다.</p>
+      <section class="panel">
+        <canvas id="game" width="800" height="520" aria-label="unit movement map"></canvas>
+        <aside>
+          <label for="command">전략/명령 입력</label>
+          <input id="command" value="move Marine 620 360" autocomplete="off" />
+          <button id="run-command">명령 실행</button>
+          <code>지원 명령:
+move Marine 620 360
+move 240 160</code>
+          <output id="status">준비됨</output>
+        </aside>
+      </section>
+    </main>
+    <script type="module" src="./src/main.js"></script>
+  </body>
+</html>

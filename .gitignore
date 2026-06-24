@@ -1,0 +1,25 @@
+# OS/editor
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Dependencies/build/test output
+node_modules/
+dist/
+build/
+coverage/
+.nyc_output/
+*.log
+
+# Local environment/secrets
+.env
+.env.*
+!.env.example
+
+# Local automation/orchestration artifacts
+.omx/
+.codex/
+.claude/
+AGENTS.md
+CLAUDE.md
