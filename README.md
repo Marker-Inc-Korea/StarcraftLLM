@@ -21,6 +21,7 @@ python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
+python scripts/run_sc2_movement.py --print-state --fast
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해"
 ```
 
@@ -71,7 +72,22 @@ scout with worker
 마린 전진
 ```
 
-Use `--print-plan` to inspect the canonical JSON without launching SC2.
+Use `--print-plan` to inspect the canonical JSON without launching SC2. Use `--print-state` to start SC2, capture the initial observation, print a JSON game-state summary, and exit.
+
+Example state summary:
+
+```json
+{
+  "minerals": 50,
+  "vespene": 0,
+  "supply": {"used": 12, "cap": 15, "left": 3},
+  "workers": 12,
+  "townhalls": 1,
+  "army": {},
+  "known_enemy_units": 0,
+  "game_time_seconds": 0.0
+}
+```
 
 Notes:
 
@@ -121,6 +137,7 @@ Implemented now:
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
+- `--print-state` game-state summary JSON for future LLM observation input;
 - local detection for common macOS SC2 install paths.
 
 Not implemented yet:

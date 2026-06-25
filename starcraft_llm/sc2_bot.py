@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import io
 import os
 import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+from starcraft_llm.game_state import (
+    GameStateSummary,
+    SupplySummary,
+    game_state_summary_to_json,
+)
 from starcraft_llm.strategy import (
     MoveCommand,
     StrategyPlan,
@@ -72,6 +79,52 @@ def _maps_path_for(sc2_base_path: Path) -> Path:
 
 class MoveUnitBot:  # Runtime base class is injected after sc2 import.
     """Factory placeholder; use create_move_unit_bot_class after importing sc2."""
+
+
+def create_game_state_bot_class(bot_ai_base):
+    class _GameStateBot(bot_ai_base):
+        def __init__(self):
+            super().__init__()
+            self.summary: GameStateSummary | None = None
+
+        async def on_start(self):
+            self.client.game_step = 2
+
+        async def on_step(self, iteration: int):
+            self.summary = summarize_bot_state(self)
+            await self.client.leave()
+
+    return _GameStateBot
+
+
+def summarize_bot_state(bot) -> GameStateSummary:
+    army: dict[str, int] = {}
+    for unit in bot.units:
+        if unit in bot.workers or unit in bot.townhalls:
+            continue
+        name = _unit_type_name(unit)
+        army[name] = army.get(name, 0) + 1
+
+    return GameStateSummary(
+        minerals=int(bot.minerals),
+        vespene=int(bot.vespene),
+        supply=SupplySummary(
+            used=int(bot.supply_used),
+            cap=int(bot.supply_cap),
+            left=int(bot.supply_left),
+        ),
+        workers=len(bot.workers),
+        townhalls=len(bot.townhalls),
+        army=army,
+        known_enemy_units=len(bot.enemy_units),
+        game_time_seconds=float(getattr(bot, "time", 0.0)),
+    )
+
+
+def _unit_type_name(unit) -> str:
+    raw_type = getattr(unit, "type_id", "unknown")
+    name = getattr(raw_type, "name", str(raw_type))
+    return name.lower()
 
 
 def create_move_unit_bot_class(bot_ai_base, point2_class):
@@ -184,9 +237,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
     return _MoveUnitBot
 
 
-def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_seconds: int) -> None:
-    """Start StarCraft II and run the minimal movement bot."""
-
+def _import_sc2_runtime():
     try:
         from sc2 import maps
         from sc2.bot_ai import BotAI
@@ -198,6 +249,57 @@ def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_secon
         raise SystemExit(
             "Missing dependency. Run: python3 -m pip install -r requirements.txt"
         ) from exc
+
+    return maps, BotAI, Difficulty, Race, run_game, Bot, Computer, Point2
+
+
+def print_game_state(map_name: str, realtime: bool) -> None:
+    """Start SC2, capture the initial bot observation, and print it as JSON."""
+
+    maps, BotAI, Difficulty, Race, run_game, Bot, Computer, _Point2 = _import_sc2_runtime()
+    bot_class = create_game_state_bot_class(BotAI)
+    bot = bot_class()
+    try:
+        selected_map = maps.get(map_name)
+    except (FileNotFoundError, KeyError) as exc:
+        env = detect_sc2_environment()
+        raise SystemExit(_map_error_message(map_name, env)) from exc
+
+    sc2_logs_disabled = False
+    try:
+        from loguru import logger
+
+        logger.disable("sc2")
+        sc2_logs_disabled = True
+    except ImportError:
+        logger = None
+
+    try:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            run_game(
+                selected_map,
+                [
+                    Bot(Race.Terran, bot),
+                    Computer(Race.Zerg, Difficulty.VeryEasy),
+                ],
+                realtime=realtime,
+            )
+    except TimeoutError as exc:
+        raise SystemExit(_api_timeout_error_message()) from exc
+    finally:
+        if sc2_logs_disabled and logger is not None:
+            logger.enable("sc2")
+
+    if bot.summary is None:
+        raise SystemExit("Failed to capture StarCraft II game state before the game ended.")
+
+    print(game_state_summary_to_json(bot.summary))
+
+
+def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_seconds: int) -> None:
+    """Start StarCraft II and run the minimal movement bot."""
+
+    maps, BotAI, Difficulty, Race, run_game, Bot, Computer, Point2 = _import_sc2_runtime()
 
     plan = parse_strategy_request(strategy)
     bot_class = create_move_unit_bot_class(BotAI, Point2)
@@ -258,6 +360,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Parse --strategy as DSL, JSON, or known intent and print canonical StrategyPlan JSON without starting SC2.",
     )
+    parser.add_argument(
+        "--print-state",
+        action="store_true",
+        help="Start SC2, print the initial game-state summary JSON, and exit without executing a strategy.",
+    )
     return parser
 
 
@@ -286,6 +393,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.print_plan:
         print(strategy_plan_to_json(parse_strategy_request(args.strategy)))
+        return 0
+
+    if args.print_state:
+        print_game_state(map_name=args.map, realtime=not args.fast)
         return 0
 
     if not env.installed:

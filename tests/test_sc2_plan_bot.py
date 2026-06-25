@@ -3,7 +3,7 @@ import contextlib
 import io
 import unittest
 
-from starcraft_llm.sc2_bot import create_move_unit_bot_class
+from starcraft_llm.sc2_bot import create_game_state_bot_class, create_move_unit_bot_class, summarize_bot_state
 from starcraft_llm.strategy import MoveCommand, StrategyPlan, WaitCommand
 
 
@@ -16,8 +16,14 @@ class FakeClient:
         self.left = True
 
 
+class FakeTypeId:
+    def __init__(self, name):
+        self.name = name
+
+
 class FakeUnit:
-    def __init__(self):
+    def __init__(self, type_name="SCV"):
+        self.type_id = FakeTypeId(type_name)
         self.targets = []
 
     def move(self, target):
@@ -33,7 +39,50 @@ class FakeBotAI:
     def __init__(self):
         self.client = FakeClient()
         self.workers = FakeUnits([FakeUnit(), FakeUnit()])
+        self.townhalls = FakeUnits([FakeUnit("COMMANDCENTER")])
         self.units = FakeUnits()
+        self.enemy_units = FakeUnits()
+        self.minerals = 50
+        self.vespene = 0
+        self.supply_used = 12
+        self.supply_cap = 15
+        self.supply_left = 3
+        self.time = 7.25
+
+
+class GameStateBotTest(unittest.TestCase):
+    def test_summarize_bot_state_returns_resource_supply_and_unit_counts(self):
+        bot = FakeBotAI()
+        marine = FakeUnit("MARINE")
+        bot.units = FakeUnits([bot.workers[0], marine, bot.townhalls[0]])
+        bot.enemy_units = FakeUnits([FakeUnit("ZERGLING")])
+
+        summary = summarize_bot_state(bot)
+
+        self.assertEqual(summary.minerals, 50)
+        self.assertEqual(summary.vespene, 0)
+        self.assertEqual(summary.supply.used, 12)
+        self.assertEqual(summary.supply.cap, 15)
+        self.assertEqual(summary.supply.left, 3)
+        self.assertEqual(summary.workers, 2)
+        self.assertEqual(summary.townhalls, 1)
+        self.assertEqual(summary.army, {"marine": 1})
+        self.assertEqual(summary.known_enemy_units, 1)
+        self.assertEqual(summary.game_time_seconds, 7.25)
+
+    def test_game_state_bot_captures_summary_and_leaves(self):
+        bot_class = create_game_state_bot_class(FakeBotAI)
+        bot = bot_class()
+
+        async def run_once():
+            await bot.on_start()
+            await bot.on_step(1)
+
+        asyncio.run(run_once())
+
+        self.assertEqual(bot.client.game_step, 2)
+        self.assertTrue(bot.client.left)
+        self.assertIsNotNone(bot.summary)
 
 
 class StrategyPlanBotTest(unittest.TestCase):

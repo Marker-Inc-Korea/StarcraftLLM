@@ -48,6 +48,11 @@ class Sc2DetectionTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("SC2 API maps directory missing", output.getvalue())
 
+    def test_print_state_argument_parses(self):
+        args = build_arg_parser().parse_args(["--print-state"])
+
+        self.assertTrue(args.print_state)
+
     def test_print_plan_does_not_require_sc2_maps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             sc2_path = Path(temp_dir) / "StarCraft II"
