@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from starcraft_llm.strategy import MoveCommand, parse_strategy
+from starcraft_llm.strategy import (
+    MoveCommand,
+    StrategyPlan,
+    WaitCommand,
+    parse_strategy_request,
+    strategy_plan_to_json,
+)
 
 DEFAULT_MAP = "AbyssalReefLE"
 DEFAULT_STRATEGY = "move worker 35 42"
@@ -70,38 +76,87 @@ class MoveUnitBot:  # Runtime base class is injected after sc2 import.
 
 def create_move_unit_bot_class(bot_ai_base, point2_class):
     class _MoveUnitBot(bot_ai_base):
-        def __init__(self, command: MoveCommand, stop_after_seconds: int = 35):
+        def __init__(self, plan: StrategyPlan, stop_after_seconds: int = 35):
             super().__init__()
-            self.command = command
+            self.plan = plan
             self.stop_after_seconds = stop_after_seconds
-            self._issued_move = False
-            self._started_at_loop_time: float | None = None
+            self._current_action_index = 0
+            self._action_started_at_loop_time: float | None = None
+            self._plan_finished_at_loop_time: float | None = None
+            self._left_game = False
 
         async def on_start(self):
             self.client.game_step = 2
-            self._started_at_loop_time = asyncio.get_running_loop().time()
-            print(f"Strategy loaded: move {self.command.unit} to ({self.command.x}, {self.command.y})")
+            print(f"Strategy plan loaded: {len(self.plan.actions)} action(s)")
+            for index, action in enumerate(self.plan.actions, start=1):
+                print(f"  {index}. {self._describe_action(action)}")
 
         async def on_step(self, iteration: int):
-            if not self._issued_move:
-                target = point2_class((self.command.x, self.command.y))
-                units = self._select_units()
-                if units:
-                    for unit in units:
-                        unit.move(target)
-                    print(f"Issued move command to {len(units)} unit(s): {target}")
-                    self._issued_move = True
-                elif iteration % 22 == 0:
-                    print(f"Waiting for controllable {self.command.unit} units...")
+            if self._plan_finished_at_loop_time is None:
+                self._execute_current_action(iteration)
 
-            if self._should_stop():
-                print("MVP complete: move command was issued; leaving the game.")
+            if not self._left_game and self._should_stop():
+                print("MVP complete: strategy plan finished; leaving the game.")
+                self._left_game = True
                 await self.client.leave()
 
-        def _select_units(self):
-            if self.command.unit == "worker":
+        def _execute_current_action(self, iteration: int) -> None:
+            if self._current_action_index >= len(self.plan.actions):
+                self._mark_plan_finished()
+                return
+
+            action = self.plan.actions[self._current_action_index]
+            if isinstance(action, MoveCommand):
+                self._execute_move(action, iteration)
+                return
+            if isinstance(action, WaitCommand):
+                self._execute_wait(action)
+                return
+
+            raise TypeError(f"unsupported strategy action: {action!r}")
+
+        def _execute_move(self, command: MoveCommand, iteration: int) -> None:
+            target = point2_class((command.x, command.y))
+            units = self._select_units(command.unit)
+            if units:
+                for unit in units:
+                    unit.move(target)
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued move command to {len(units)} {command.unit} unit(s): {target}"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for controllable {command.unit} units...")
+
+        def _execute_wait(self, command: WaitCommand) -> None:
+            now = asyncio.get_running_loop().time()
+            if self._action_started_at_loop_time is None:
+                self._action_started_at_loop_time = now
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"waiting {command.seconds:g} second(s)"
+                )
+
+            elapsed = now - self._action_started_at_loop_time
+            if elapsed >= command.seconds:
+                self._advance_action()
+
+        def _advance_action(self) -> None:
+            self._current_action_index += 1
+            self._action_started_at_loop_time = None
+            if self._current_action_index >= len(self.plan.actions):
+                self._mark_plan_finished()
+
+        def _mark_plan_finished(self) -> None:
+            if self._plan_finished_at_loop_time is None:
+                self._plan_finished_at_loop_time = asyncio.get_running_loop().time()
+                print("Strategy plan actions complete.")
+
+        def _select_units(self, unit: str):
+            if unit == "worker":
                 return self.workers
-            if self.command.unit == "marine":
+            if unit == "marine":
                 marines = self.units.of_type({self._unit_type_id().MARINE})
                 return marines if marines else self.workers
             return self.workers
@@ -113,10 +168,18 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             return UnitTypeId
 
         def _should_stop(self) -> bool:
-            if self._started_at_loop_time is None:
+            if self._plan_finished_at_loop_time is None:
                 return False
-            elapsed = asyncio.get_running_loop().time() - self._started_at_loop_time
-            return self._issued_move and elapsed >= self.stop_after_seconds
+            elapsed = asyncio.get_running_loop().time() - self._plan_finished_at_loop_time
+            return elapsed >= self.stop_after_seconds
+
+        @staticmethod
+        def _describe_action(action) -> str:
+            if isinstance(action, MoveCommand):
+                return f"move {action.unit} to ({action.x:g}, {action.y:g})"
+            if isinstance(action, WaitCommand):
+                return f"wait {action.seconds:g} second(s)"
+            return repr(action)
 
     return _MoveUnitBot
 
@@ -136,7 +199,7 @@ def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_secon
             "Missing dependency. Run: python3 -m pip install -r requirements.txt"
         ) from exc
 
-    command = parse_strategy(strategy)
+    plan = parse_strategy_request(strategy)
     bot_class = create_move_unit_bot_class(BotAI, Point2)
     try:
         selected_map = maps.get(map_name)
@@ -148,7 +211,7 @@ def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_secon
         run_game(
             selected_map,
             [
-                Bot(Race.Terran, bot_class(command, stop_after_seconds=stop_after_seconds)),
+                Bot(Race.Terran, bot_class(plan, stop_after_seconds=stop_after_seconds)),
                 Computer(Race.Zerg, Difficulty.VeryEasy),
             ],
             realtime=realtime,
@@ -190,6 +253,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--stop-after", type=int, default=35, help="Seconds to keep the game open after issuing move.")
     parser.add_argument("--fast", action="store_true", help="Run non-realtime for faster automated checks.")
     parser.add_argument("--check", action="store_true", help="Only check local SC2 installation hints; do not start the game.")
+    parser.add_argument(
+        "--print-plan",
+        action="store_true",
+        help="Parse --strategy as DSL, JSON, or known intent and print canonical StrategyPlan JSON without starting SC2.",
+    )
     return parser
 
 
@@ -215,6 +283,10 @@ def main(argv: list[str] | None = None) -> int:
         print("Install/extract a Blizzard SC2 map pack into the Maps folder before launching a game.")
         print("The default map needs the Ladder 2017 Season 1 map pack, or pass another installed map with --map.")
         return 1
+
+    if args.print_plan:
+        print(strategy_plan_to_json(parse_strategy_request(args.strategy)))
+        return 0
 
     if not env.installed:
         print("Warning: StarCraft II was not detected before launch; python-sc2 may still find it if configured.")

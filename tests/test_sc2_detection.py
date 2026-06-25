@@ -48,6 +48,20 @@ class Sc2DetectionTest(unittest.TestCase):
         self.assertEqual(exit_code, 1)
         self.assertIn("SC2 API maps directory missing", output.getvalue())
 
+    def test_print_plan_does_not_require_sc2_maps(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            sc2_path = Path(temp_dir) / "StarCraft II"
+            sc2_path.mkdir()
+
+            with patch.dict(os.environ, {"SC2PATH": str(sc2_path)}):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    exit_code = main(["--strategy", "일꾼으로 정찰해", "--print-plan"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn('"actions"', output.getvalue())
+        self.assertIn('"type": "move"', output.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,7 +5,7 @@ A small first step toward a strategy-driven StarCraft agent.
 The repo has two runnable paths:
 
 1. a fast browser canvas prototype for movement logic;
-2. a real StarCraft II API bot that starts SC2 and issues an in-game move command.
+2. a real StarCraft II API bot that starts SC2 and executes a small deterministic strategy plan.
 
 ## Real StarCraft II movement MVP
 
@@ -19,6 +19,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
+python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
+python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
+python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해"
 ```
 
 What this does:
@@ -26,16 +29,49 @@ What this does:
 - starts a real StarCraft II custom game through the SC2 API;
 - plays Terran against a very easy Zerg computer;
 - selects the starting worker units;
-- issues a real in-game move command to the requested map coordinate;
-- keeps the game open briefly so the movement can be seen.
+- executes each primitive action in the requested strategy plan;
+- issues real in-game move commands to the requested map coordinates;
+- keeps the game open briefly after the plan finishes so the movement can be seen.
 
-Supported MVP strategy commands:
+Supported MVP strategy actions:
 
 ```text
 move worker 35 42
 move marine 35 42
 move 35 42
+wait 1
 ```
+
+Multiple actions can be separated by semicolons, newlines, or `then`:
+
+```text
+move worker 35 42; wait 1; move worker 45 42
+move worker 35 42 then wait 1 then move worker 45 42
+```
+
+This deterministic plan format is the next integration seam for an LLM: the LLM can translate a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
+
+The same plan can be provided as JSON, which is the intended future LLM output contract:
+
+```json
+{
+  "actions": [
+    {"type": "move", "unit": "worker", "x": 35, "y": 42},
+    {"type": "wait", "seconds": 1},
+    {"type": "move", "unit": "worker", "x": 45, "y": 42}
+  ]
+}
+```
+
+A small rule-based intent translator is also available before real LLM integration:
+
+```text
+일꾼으로 정찰해
+scout with worker
+마린 전진
+```
+
+Use `--print-plan` to inspect the canonical JSON without launching SC2.
 
 Notes:
 
@@ -81,13 +117,15 @@ Implemented now:
 
 - browser `Unit.moveTo(x, y)` movement logic;
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
-- real SC2 `move worker/marine x y` strategy parser;
-- real SC2 bot runner that issues movement commands through the StarCraft II API;
+- real SC2 `move worker/marine x y` and `wait seconds` strategy-plan parser;
+- canonical JSON StrategyPlan parser/serializer for future LLM output;
+- tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
+- real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
 - local detection for common macOS SC2 install paths.
 
 Not implemented yet:
 
 - full build-order or combat strategy execution;
-- natural-language strategy planning;
+- real LLM-backed natural-language strategy planning;
 - computer vision;
 - Brood War/BWAPI integration.
