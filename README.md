@@ -9,7 +9,9 @@ The repo has two runnable paths:
 
 ## Real StarCraft II movement MVP
 
-On macOS, install StarCraft II with the Blizzard/Battle.net app first, then run:
+On macOS, install StarCraft II with the Blizzard/Battle.net app first. The SC2 API also needs local map files under the install directory; the Battle.net app may not create this folder automatically. Download an official Blizzard map pack from <https://github.com/Blizzard/s2client-proto#map-packs> and extract it into `/Applications/StarCraft II/Maps/`. The default `AbyssalReefLE` map is in the Ladder 2017 Season 1 pack.
+
+Then run:
 
 ```bash
 python3 -m venv .venv
@@ -40,7 +42,9 @@ Notes:
 - This targets StarCraft II because Blizzard's SC2 API supports macOS clients.
 - Classic StarCraft/Brood War bot control is not the macOS-friendly path for this MVP.
 - If your SC2 install is in a custom location, set `SC2PATH` to the StarCraft II install directory.
-- The default map is `Abyssal Reef LE`; if your install does not have that map, pass another installed map with `--map "Map Name"`.
+- `--check` verifies both the SC2 app path and the API `Maps` directory.
+- The default map is `AbyssalReefLE`; if your install does not have that map, pass another installed map with `--map "Map Name"`.
+- If launch fails with an SC2 API websocket timeout, open StarCraft II once from Battle.net, finish first-run setup/login/update prompts, quit the game, and rerun the script.
 
 ## Browser prototype
 

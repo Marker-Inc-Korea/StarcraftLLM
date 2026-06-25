@@ -10,7 +10,7 @@ from typing import Iterable
 
 from starcraft_llm.strategy import MoveCommand, parse_strategy
 
-DEFAULT_MAP = "Abyssal Reef LE"
+DEFAULT_MAP = "AbyssalReefLE"
 DEFAULT_STRATEGY = "move worker 35 42"
 
 
@@ -20,6 +20,8 @@ class Sc2Environment:
     candidate_paths: tuple[Path, ...]
     detected_path: Path | None
     sc2path_env: str | None
+    maps_path: Path | None
+    maps_installed: bool
 
 
 def detect_sc2_environment() -> Sc2Environment:
@@ -28,11 +30,16 @@ def detect_sc2_environment() -> Sc2Environment:
     sc2path_env = os.environ.get("SC2PATH")
     candidates = tuple(_candidate_sc2_paths())
     detected = next((path for path in candidates if path.exists()), None)
+    detected_path = Path(sc2path_env).expanduser() if sc2path_env else detected
+    maps_path = _maps_path_for(detected_path) if detected_path else None
+    maps_installed = bool(maps_path and maps_path.exists())
     return Sc2Environment(
-        installed=bool(sc2path_env or detected),
+        installed=bool(detected_path and detected_path.exists()),
         candidate_paths=candidates,
-        detected_path=Path(sc2path_env).expanduser() if sc2path_env else detected,
+        detected_path=detected_path,
         sc2path_env=sc2path_env,
+        maps_path=maps_path,
+        maps_installed=maps_installed,
     )
 
 
@@ -48,6 +55,13 @@ def _candidate_sc2_paths() -> Iterable[Path]:
     else:
         yield home / "StarCraftII"
         yield home / "Games" / "battlenet" / "drive_c" / "Program Files (x86)" / "StarCraft II"
+
+
+def _maps_path_for(sc2_base_path: Path) -> Path:
+    lower_case_maps = sc2_base_path / "maps"
+    if lower_case_maps.exists():
+        return lower_case_maps
+    return sc2_base_path / "Maps"
 
 
 class MoveUnitBot:  # Runtime base class is injected after sc2 import.
@@ -124,13 +138,44 @@ def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_secon
 
     command = parse_strategy(strategy)
     bot_class = create_move_unit_bot_class(BotAI, Point2)
-    run_game(
-        maps.get(map_name),
+    try:
+        selected_map = maps.get(map_name)
+    except (FileNotFoundError, KeyError) as exc:
+        env = detect_sc2_environment()
+        raise SystemExit(_map_error_message(map_name, env)) from exc
+
+    try:
+        run_game(
+            selected_map,
+            [
+                Bot(Race.Terran, bot_class(command, stop_after_seconds=stop_after_seconds)),
+                Computer(Race.Zerg, Difficulty.VeryEasy),
+            ],
+            realtime=realtime,
+        )
+    except TimeoutError as exc:
+        raise SystemExit(_api_timeout_error_message()) from exc
+
+
+def _api_timeout_error_message() -> str:
+    return "\n".join(
         [
-            Bot(Race.Terran, bot_class(command, stop_after_seconds=stop_after_seconds)),
-            Computer(Race.Zerg, Difficulty.VeryEasy),
-        ],
-        realtime=realtime,
+            "StarCraft II launched, but its local SC2 API websocket did not open before timeout.",
+            "Open StarCraft II once from Battle.net, finish any first-run setup/login/update prompts, then quit and rerun this script.",
+            "Also allow StarCraft II through any macOS firewall prompt for local connections.",
+        ]
+    )
+
+
+def _map_error_message(map_name: str, env: Sc2Environment) -> str:
+    maps_path = env.maps_path or Path("<SC2 install>") / "Maps"
+    return "\n".join(
+        [
+            f"StarCraft II map '{map_name}' was not found.",
+            f"Expected local API maps under: {maps_path}",
+            "Install/extract a Blizzard SC2 map pack into that Maps folder, then rerun.",
+            "For the default map, use the Ladder 2017 Season 1 map pack or pass another installed map with --map.",
+        ]
     )
 
 
@@ -153,18 +198,28 @@ def main(argv: list[str] | None = None) -> int:
     env = detect_sc2_environment()
 
     if args.check:
-        if env.installed:
-            print(f"StarCraft II path detected: {env.detected_path}")
+        if not env.installed:
+            print("StarCraft II was not detected automatically.")
+            print("Install StarCraft II with the Blizzard/Battle.net app or set SC2PATH to the install directory.")
+            print("Checked paths:")
+            for path in env.candidate_paths:
+                print(f"- {path}")
+            return 1
+
+        print(f"StarCraft II path detected: {env.detected_path}")
+        if env.maps_installed:
+            print(f"SC2 API maps directory detected: {env.maps_path}")
             return 0
-        print("StarCraft II was not detected automatically.")
-        print("Install StarCraft II with the Blizzard/Battle.net app or set SC2PATH to the install directory.")
-        print("Checked paths:")
-        for path in env.candidate_paths:
-            print(f"- {path}")
+
+        print(f"SC2 API maps directory missing: {env.maps_path}")
+        print("Install/extract a Blizzard SC2 map pack into the Maps folder before launching a game.")
+        print("The default map needs the Ladder 2017 Season 1 map pack, or pass another installed map with --map.")
         return 1
 
     if not env.installed:
         print("Warning: StarCraft II was not detected before launch; python-sc2 may still find it if configured.")
+    elif not env.maps_installed:
+        print(f"Warning: SC2 API maps directory was not detected at {env.maps_path}; launch may fail.")
 
     run_real_game(
         strategy=args.strategy,
