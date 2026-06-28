@@ -4,7 +4,7 @@ import io
 import unittest
 
 from starcraft_llm.sc2_bot import create_game_state_bot_class, create_move_unit_bot_class, summarize_bot_state
-from starcraft_llm.strategy import MoveCommand, StrategyPlan, WaitCommand
+from starcraft_llm.strategy import GatherMineralsCommand, MoveCommand, StrategyPlan, TrainUnitCommand, WaitCommand
 
 
 class FakeClient:
@@ -25,14 +25,37 @@ class FakeUnit:
     def __init__(self, type_name="SCV"):
         self.type_id = FakeTypeId(type_name)
         self.targets = []
+        self.gather_targets = []
+        self.trained_units = []
 
     def move(self, target):
         self.targets.append(target)
 
+    def gather(self, target):
+        self.gather_targets.append(target)
+
+    def train(self, unit_type):
+        self.trained_units.append(unit_type)
+
 
 class FakeUnits(list):
+    @property
+    def ready(self):
+        return self
+
+    @property
+    def idle(self):
+        return self
+
+    @property
+    def first(self):
+        return self[0]
+
     def of_type(self, _unit_types):
         return FakeUnits()
+
+    def closest_to(self, _unit):
+        return self[0]
 
 
 class FakeBotAI:
@@ -42,12 +65,16 @@ class FakeBotAI:
         self.townhalls = FakeUnits([FakeUnit("COMMANDCENTER")])
         self.units = FakeUnits()
         self.enemy_units = FakeUnits()
+        self.mineral_field = FakeUnits([FakeUnit("MINERALFIELD")])
         self.minerals = 50
         self.vespene = 0
         self.supply_used = 12
         self.supply_cap = 15
         self.supply_left = 3
         self.time = 7.25
+
+    def can_afford(self, _unit_type):
+        return True
 
 
 class GameStateBotTest(unittest.TestCase):
@@ -86,6 +113,31 @@ class GameStateBotTest(unittest.TestCase):
 
 
 class StrategyPlanBotTest(unittest.TestCase):
+    def test_bot_executes_gather_and_train_actions(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                GatherMineralsCommand(unit="worker"),
+                TrainUnitCommand(unit="scv"),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            await bot.on_step(2)
+            await bot.on_step(3)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        mineral = bot.mineral_field[0]
+        self.assertEqual(bot.workers[0].gather_targets, [mineral])
+        self.assertEqual(bot.workers[1].gather_targets, [mineral])
+        self.assertEqual(len(bot.townhalls[0].trained_units), 1)
+        self.assertTrue(bot.client.left)
+
     def test_bot_executes_move_wait_move_plan_in_order(self):
         bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
         plan = StrategyPlan(

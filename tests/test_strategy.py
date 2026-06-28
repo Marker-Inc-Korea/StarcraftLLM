@@ -2,9 +2,11 @@ import json
 import unittest
 
 from starcraft_llm.strategy import (
+    GatherMineralsCommand,
     MoveCommand,
     StrategyParseError,
     StrategyPlan,
+    TrainUnitCommand,
     WaitCommand,
     parse_strategy,
     parse_strategy_plan,
@@ -59,9 +61,20 @@ class StrategyParserTest(unittest.TestCase):
         self.assertEqual(plan.actions[1], WaitCommand(seconds=0))
         self.assertEqual(plan.actions[2], MoveCommand(unit="worker", x=11, y=21))
 
+    def test_parse_gather_and_train_actions(self):
+        plan = parse_strategy_plan("gather minerals; train scv")
+
+        self.assertEqual(
+            plan.actions,
+            (
+                GatherMineralsCommand(unit="worker"),
+                TrainUnitCommand(unit="scv"),
+            ),
+        )
+
     def test_parse_json_strategy_plan(self):
         plan = parse_strategy_plan_json(
-            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1}]}'
+            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"}]}'
         )
 
         self.assertEqual(
@@ -70,6 +83,8 @@ class StrategyParserTest(unittest.TestCase):
                 actions=(
                     MoveCommand(unit="worker", x=35, y=42),
                     WaitCommand(seconds=1),
+                    GatherMineralsCommand(unit="worker"),
+                    TrainUnitCommand(unit="scv"),
                 )
             ),
         )
@@ -84,6 +99,8 @@ class StrategyParserTest(unittest.TestCase):
             actions=(
                 MoveCommand(unit="worker", x=35, y=42),
                 WaitCommand(seconds=1),
+                GatherMineralsCommand(unit="worker"),
+                TrainUnitCommand(unit="scv"),
             )
         )
 
@@ -97,6 +114,8 @@ class StrategyParserTest(unittest.TestCase):
                 "actions": [
                     {"type": "move", "unit": "worker", "x": 35, "y": 42},
                     {"type": "wait", "seconds": 1},
+                    {"type": "gather", "unit": "worker", "resource": "minerals"},
+                    {"type": "train", "unit": "scv"},
                 ]
             },
         )
@@ -142,6 +161,10 @@ class StrategyParserTest(unittest.TestCase):
     def test_rejects_negative_wait(self):
         with self.assertRaises(StrategyParseError):
             parse_strategy_plan("wait -1")
+
+    def test_parse_strategy_request_accepts_resource_and_train_intents(self):
+        self.assertEqual(parse_strategy_request("미네랄 캐").actions, (GatherMineralsCommand(unit="worker"),))
+        self.assertEqual(parse_strategy_request("train scv").actions, (TrainUnitCommand(unit="scv"),))
 
     def test_rejects_unknown_json_action(self):
         with self.assertRaises(StrategyParseError):

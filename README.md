@@ -20,6 +20,7 @@ pip install -r requirements.txt
 python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
+python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
 python scripts/run_sc2_movement.py --print-state --fast
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해"
@@ -41,6 +42,9 @@ move worker 35 42
 move marine 35 42
 move 35 42
 wait 1
+gather minerals
+gather worker minerals
+train scv
 ```
 
 Multiple actions can be separated by semicolons, newlines, or `then`:
@@ -59,7 +63,9 @@ The same plan can be provided as JSON, which is the intended future LLM output c
   "actions": [
     {"type": "move", "unit": "worker", "x": 35, "y": 42},
     {"type": "wait", "seconds": 1},
-    {"type": "move", "unit": "worker", "x": 45, "y": 42}
+    {"type": "move", "unit": "worker", "x": 45, "y": 42},
+    {"type": "gather", "unit": "worker", "resource": "minerals"},
+    {"type": "train", "unit": "scv"}
   ]
 }
 ```
@@ -133,7 +139,7 @@ Implemented now:
 
 - browser `Unit.moveTo(x, y)` movement logic;
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
-- real SC2 `move worker/marine x y` and `wait seconds` strategy-plan parser;
+- real SC2 `move worker/marine x y`, `wait seconds`, `gather minerals`, and `train scv` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
@@ -142,7 +148,7 @@ Implemented now:
 
 Not implemented yet:
 
-- full build-order or combat strategy execution;
+- full build-order or combat strategy execution beyond one-step SCV training;
 - real LLM-backed natural-language strategy planning;
 - computer vision;
 - Brood War/BWAPI integration.

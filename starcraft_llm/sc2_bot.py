@@ -16,8 +16,10 @@ from starcraft_llm.game_state import (
     game_state_summary_to_json,
 )
 from starcraft_llm.strategy import (
+    GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
+    TrainUnitCommand,
     WaitCommand,
     parse_strategy_request,
     strategy_plan_to_json,
@@ -165,6 +167,12 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, WaitCommand):
                 self._execute_wait(action)
                 return
+            if isinstance(action, GatherMineralsCommand):
+                self._execute_gather_minerals(action, iteration)
+                return
+            if isinstance(action, TrainUnitCommand):
+                self._execute_train(action, iteration)
+                return
 
             raise TypeError(f"unsupported strategy action: {action!r}")
 
@@ -195,6 +203,67 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if elapsed >= command.seconds:
                 self._advance_action()
 
+        def _execute_gather_minerals(self, command: GatherMineralsCommand, iteration: int) -> None:
+            workers = self._select_units(command.unit)
+            mineral_fields = self.mineral_field
+            if workers and mineral_fields:
+                issued = 0
+                for worker in workers:
+                    mineral_field = self._closest_mineral_field(mineral_fields, worker)
+                    worker.gather(mineral_field)
+                    issued += 1
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued gather minerals command to {issued} worker unit(s)"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print("Waiting for workers and mineral fields before gathering...")
+
+        def _execute_train(self, command: TrainUnitCommand, iteration: int) -> None:
+            if command.unit != "scv":
+                raise TypeError(f"unsupported train unit: {command.unit}")
+
+            unit_type = self._unit_type_id().SCV
+            townhalls = self._available_townhalls()
+            if not townhalls:
+                if iteration % 22 == 0:
+                    print("Waiting for an available townhall to train SCV...")
+                return
+
+            if hasattr(self, "can_afford") and not self.can_afford(unit_type):
+                if iteration % 22 == 0:
+                    print("Waiting for enough resources to train SCV...")
+                return
+
+            townhall = self._first_unit(townhalls)
+            townhall.train(unit_type)
+            print(
+                f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                "issued train SCV command"
+            )
+            self._advance_action()
+
+        @staticmethod
+        def _closest_mineral_field(mineral_fields, worker):
+            if hasattr(mineral_fields, "closest_to"):
+                return mineral_fields.closest_to(worker)
+            return mineral_fields[0]
+
+        def _available_townhalls(self):
+            townhalls = self.townhalls
+            if hasattr(townhalls, "ready"):
+                townhalls = townhalls.ready
+            if hasattr(townhalls, "idle"):
+                townhalls = townhalls.idle
+            return townhalls
+
+        @staticmethod
+        def _first_unit(units):
+            if hasattr(units, "first"):
+                return units.first
+            return units[0]
+
         def _advance_action(self) -> None:
             self._current_action_index += 1
             self._action_started_at_loop_time = None
@@ -216,9 +285,16 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
 
         @staticmethod
         def _unit_type_id():
-            from sc2.ids.unit_typeid import UnitTypeId
+            try:
+                from sc2.ids.unit_typeid import UnitTypeId
 
-            return UnitTypeId
+                return UnitTypeId
+            except ImportError:
+                class _FallbackUnitTypeId:
+                    SCV = "SCV"
+                    MARINE = "MARINE"
+
+                return _FallbackUnitTypeId
 
         def _should_stop(self) -> bool:
             if self._plan_finished_at_loop_time is None:
@@ -232,6 +308,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"move {action.unit} to ({action.x:g}, {action.y:g})"
             if isinstance(action, WaitCommand):
                 return f"wait {action.seconds:g} second(s)"
+            if isinstance(action, GatherMineralsCommand):
+                return f"gather minerals with {action.unit}"
+            if isinstance(action, TrainUnitCommand):
+                return f"train {action.unit}"
             return repr(action)
 
     return _MoveUnitBot
