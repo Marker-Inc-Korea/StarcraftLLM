@@ -20,6 +20,7 @@ pip install -r requirements.txt
 python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --planner rule --strategy "move worker 35 42"
+python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
@@ -57,7 +58,7 @@ move worker 35 42 then wait 1 then move worker 45 42
 
 This deterministic plan format is the next integration seam for an LLM: the planner translates a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
 
-Planner mode is explicit. The default is fixed to `--planner rule`, which uses the local deterministic parser/intent translator. Other modes do not run as fallbacks; they must be selected explicitly. `--planner openai` and `--planner server` are reserved interface modes and currently fail with a clear “not implemented yet” message until those integrations are added.
+Planner mode is explicit. The default is fixed to `--planner rule`, which uses the local deterministic parser/intent translator. Other modes do not run as fallbacks; they must be selected explicitly. `--planner gemini` calls the Gemini API and must succeed on its own. `--planner openai` and `--planner server` are reserved interface modes and currently fail with a clear “not implemented yet” message until those integrations are added.
 
 The same plan can be provided as JSON, which is the intended future LLM output contract:
 
@@ -80,6 +81,28 @@ A small rule-based intent translator is also available before real LLM integrati
 scout with worker
 마린 전진
 ```
+
+
+### Gemini planner setup
+
+`--planner gemini` calls the Gemini Interactions API and asks it to return the same canonical StrategyPlan JSON that the local executor already validates. The default model is `gemini-2.5-flash`; override it with `STARCRAFT_LLM_GEMINI_MODEL` if needed.
+
+Provide the API key with an environment variable:
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
+```
+
+For local-only testing, you can also store the key in a git-ignored file:
+
+```bash
+mkdir -p .secrets
+printf "%s" "your-key-here" > .secrets/gemini_api_key.txt
+python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
+```
+
+`.secrets/` is ignored by git. Do not commit API keys, screenshots containing keys, or terminal logs that print keys.
 
 Use `--print-plan` to inspect the canonical JSON without launching SC2. Use `--print-state` to start SC2, capture the initial observation, print a JSON game-state summary, and exit.
 
@@ -144,7 +167,7 @@ Implemented now:
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
 - real SC2 `move worker/marine x y`, `wait seconds`, `gather minerals`, and `train scv` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
-- planner interface with a fixed default `rule` planner and explicit future `openai`/`server` modes;
+- planner interface with a fixed default `rule` planner, Gemini API planner, and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
 - `--print-state` game-state summary JSON for future LLM observation input;
@@ -154,6 +177,6 @@ Not implemented yet:
 
 - full build-order or combat strategy execution beyond one-step SCV training;
 - implemented `openai` or `server` planner integrations;
-- real LLM-backed natural-language strategy planning;
+- closed-loop replanning from live game state;
 - computer vision;
 - Brood War/BWAPI integration.

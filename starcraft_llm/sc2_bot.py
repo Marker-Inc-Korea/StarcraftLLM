@@ -19,6 +19,7 @@ from starcraft_llm.game_state import (
 from starcraft_llm.planner import (
     DEFAULT_PLANNER,
     PLANNER_MODES,
+    PlannerError,
     PlannerUnavailableError,
     plan_strategy,
 )
@@ -491,7 +492,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_plan:
         try:
             plan = plan_strategy(args.strategy, planner_name=args.planner)
-        except (PlannerUnavailableError, ValueError) as exc:
+        except (PlannerError, PlannerUnavailableError, ValueError) as exc:
             print(f"Planner error: {exc}", file=sys.stderr)
             return 2
         print(strategy_plan_to_json(plan))
@@ -514,7 +515,7 @@ def main(argv: list[str] | None = None) -> int:
             stop_after_seconds=args.stop_after,
             planner_name=args.planner,
         )
-    except (PlannerUnavailableError, ValueError) as exc:
+    except (PlannerError, PlannerUnavailableError, ValueError) as exc:
         print(f"Planner error: {exc}", file=sys.stderr)
         return 2
     return 0
