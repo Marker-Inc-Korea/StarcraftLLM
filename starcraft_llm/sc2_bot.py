@@ -6,6 +6,7 @@ import contextlib
 import io
 import os
 import platform
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -15,13 +16,18 @@ from starcraft_llm.game_state import (
     SupplySummary,
     game_state_summary_to_json,
 )
+from starcraft_llm.planner import (
+    DEFAULT_PLANNER,
+    PLANNER_MODES,
+    PlannerUnavailableError,
+    plan_strategy,
+)
 from starcraft_llm.strategy import (
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
-    parse_strategy_request,
     strategy_plan_to_json,
 )
 
@@ -376,12 +382,17 @@ def print_game_state(map_name: str, realtime: bool) -> None:
     print(game_state_summary_to_json(bot.summary))
 
 
-def run_real_game(strategy: str, map_name: str, realtime: bool, stop_after_seconds: int) -> None:
+def run_real_game(
+    strategy: str,
+    map_name: str,
+    realtime: bool,
+    stop_after_seconds: int,
+    planner_name: str = DEFAULT_PLANNER,
+) -> None:
     """Start StarCraft II and run the minimal movement bot."""
 
+    plan = plan_strategy(strategy, planner_name=planner_name)
     maps, BotAI, Difficulty, Race, run_game, Bot, Computer, Point2 = _import_sc2_runtime()
-
-    plan = parse_strategy_request(strategy)
     bot_class = create_move_unit_bot_class(BotAI, Point2)
     try:
         selected_map = maps.get(map_name)
@@ -432,6 +443,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help=f"Strategy command to execute. Default: {DEFAULT_STRATEGY!r}",
     )
     parser.add_argument("--map", default=DEFAULT_MAP, help=f"SC2 map name. Default: {DEFAULT_MAP!r}")
+    parser.add_argument(
+        "--planner",
+        default=DEFAULT_PLANNER,
+        choices=PLANNER_MODES,
+        help=f"Planner mode. Default: {DEFAULT_PLANNER!r}. Other modes must be selected explicitly.",
+    )
     parser.add_argument("--stop-after", type=int, default=35, help="Seconds to keep the game open after issuing move.")
     parser.add_argument("--fast", action="store_true", help="Run non-realtime for faster automated checks.")
     parser.add_argument("--check", action="store_true", help="Only check local SC2 installation hints; do not start the game.")
@@ -472,7 +489,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     if args.print_plan:
-        print(strategy_plan_to_json(parse_strategy_request(args.strategy)))
+        try:
+            plan = plan_strategy(args.strategy, planner_name=args.planner)
+        except (PlannerUnavailableError, ValueError) as exc:
+            print(f"Planner error: {exc}", file=sys.stderr)
+            return 2
+        print(strategy_plan_to_json(plan))
         return 0
 
     if args.print_state:
@@ -484,12 +506,17 @@ def main(argv: list[str] | None = None) -> int:
     elif not env.maps_installed:
         print(f"Warning: SC2 API maps directory was not detected at {env.maps_path}; launch may fail.")
 
-    run_real_game(
-        strategy=args.strategy,
-        map_name=args.map,
-        realtime=not args.fast,
-        stop_after_seconds=args.stop_after,
-    )
+    try:
+        run_real_game(
+            strategy=args.strategy,
+            map_name=args.map,
+            realtime=not args.fast,
+            stop_after_seconds=args.stop_after,
+            planner_name=args.planner,
+        )
+    except (PlannerUnavailableError, ValueError) as exc:
+        print(f"Planner error: {exc}", file=sys.stderr)
+        return 2
     return 0
 
 

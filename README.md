@@ -19,6 +19,7 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
+python scripts/run_sc2_movement.py --planner rule --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
@@ -54,7 +55,9 @@ move worker 35 42; wait 1; move worker 45 42
 move worker 35 42 then wait 1 then move worker 45 42
 ```
 
-This deterministic plan format is the next integration seam for an LLM: the LLM can translate a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
+This deterministic plan format is the next integration seam for an LLM: the planner translates a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
+
+Planner mode is explicit. The default is fixed to `--planner rule`, which uses the local deterministic parser/intent translator. Other modes do not run as fallbacks; they must be selected explicitly. `--planner openai` and `--planner server` are reserved interface modes and currently fail with a clear “not implemented yet” message until those integrations are added.
 
 The same plan can be provided as JSON, which is the intended future LLM output contract:
 
@@ -141,6 +144,7 @@ Implemented now:
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
 - real SC2 `move worker/marine x y`, `wait seconds`, `gather minerals`, and `train scv` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
+- planner interface with a fixed default `rule` planner and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
 - `--print-state` game-state summary JSON for future LLM observation input;
@@ -149,6 +153,7 @@ Implemented now:
 Not implemented yet:
 
 - full build-order or combat strategy execution beyond one-step SCV training;
+- implemented `openai` or `server` planner integrations;
 - real LLM-backed natural-language strategy planning;
 - computer vision;
 - Brood War/BWAPI integration.
