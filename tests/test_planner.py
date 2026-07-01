@@ -69,6 +69,19 @@ class PlannerInterfaceTest(unittest.TestCase):
         self.assertEqual(captured["payload"]["response_format"]["mime_type"], "application/json")
         self.assertIn("early economy", captured["payload"]["input"])
 
+    def test_gemini_planner_accepts_plan_alias_from_model_output(self):
+        def fake_post(url, headers, payload, timeout):
+            return {
+                "output_text": json.dumps(
+                    {"plan": [{"type": "gather", "unit": "worker", "resource": "minerals"}]}
+                )
+            }
+
+        planner = GeminiPlanner(api_key="test-key", http_post=fake_post)
+        plan = planner.create_plan(_request("early economy"))
+
+        self.assertEqual(plan.actions, (GatherMineralsCommand(unit="worker"),))
+
     def test_gemini_planner_extracts_rest_step_model_output(self):
         def fake_post(url, headers, payload, timeout):
             return {

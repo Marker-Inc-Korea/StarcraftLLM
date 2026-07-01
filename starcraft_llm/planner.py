@@ -108,6 +108,7 @@ class GeminiPlanner:
         except json.JSONDecodeError as exc:
             raise PlannerError(f"Gemini planner returned invalid JSON: {exc.msg}") from exc
 
+        plan_payload = _normalize_gemini_plan_payload(plan_payload)
         try:
             return strategy_plan_from_dict(plan_payload, default_unit=request.default_unit)
         except Exception as exc:
@@ -218,7 +219,7 @@ def _build_gemini_prompt(request: PlannerRequest) -> str:
     return "\n".join(
         [
             "You are the planner for a minimal StarCraft II bot.",
-            "Return only JSON matching the StrategyPlan schema. Do not include markdown.",
+            "Return only JSON matching this exact root shape: {\"actions\": [...]}. Do not use a different top-level key such as plan. Do not include markdown.",
             "Available actions are exactly:",
             "- move: {type:'move', unit:'worker'|'marine', x:number, y:number}",
             "- wait: {type:'wait', seconds:number}",
@@ -235,6 +236,12 @@ def _build_gemini_prompt(request: PlannerRequest) -> str:
             json.dumps(game_state, ensure_ascii=False),
         ]
     )
+
+
+def _normalize_gemini_plan_payload(payload: Any) -> Any:
+    if isinstance(payload, dict) and "actions" not in payload and isinstance(payload.get("plan"), list):
+        return {"actions": payload["plan"]}
+    return payload
 
 
 def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
