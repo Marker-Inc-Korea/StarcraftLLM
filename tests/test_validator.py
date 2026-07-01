@@ -1,7 +1,15 @@
 import unittest
 
 from starcraft_llm.game_state import GameStateSummary, SupplySummary
-from starcraft_llm.strategy import GatherMineralsCommand, MoveCommand, StrategyPlan, TrainUnitCommand, WaitCommand
+from starcraft_llm.strategy import (
+    AttackMoveCommand,
+    BuildStructureCommand,
+    GatherMineralsCommand,
+    MoveCommand,
+    StrategyPlan,
+    TrainUnitCommand,
+    WaitCommand,
+)
 from starcraft_llm.validator import PlanValidationError, validate_strategy_plan
 
 
@@ -16,6 +24,17 @@ class PlanValidatorTest(unittest.TestCase):
 
         self.assertIs(validate_strategy_plan(plan, _state()), plan)
 
+    def test_accepts_feasible_build_and_marine_plan_with_game_state(self):
+        plan = StrategyPlan(
+            actions=(
+                BuildStructureCommand(building="barracks"),
+                TrainUnitCommand(unit="marine"),
+                AttackMoveCommand(unit="marine", x=55, y=45),
+            )
+        )
+
+        self.assertIs(validate_strategy_plan(plan, _state(minerals=250, structures={"supplydepot": 1})), plan)
+
     def test_rejects_train_scv_without_enough_minerals(self):
         plan = StrategyPlan(actions=(TrainUnitCommand(unit="scv"),))
 
@@ -27,6 +46,24 @@ class PlanValidatorTest(unittest.TestCase):
 
         with self.assertRaisesRegex(PlanValidationError, "no supply"):
             validate_strategy_plan(plan, _state(supply_left=0))
+
+    def test_rejects_train_marine_without_barracks(self):
+        plan = StrategyPlan(actions=(TrainUnitCommand(unit="marine"),))
+
+        with self.assertRaisesRegex(PlanValidationError, "without a barracks"):
+            validate_strategy_plan(plan, _state(minerals=100))
+
+    def test_rejects_build_barracks_before_supply_depot(self):
+        plan = StrategyPlan(actions=(BuildStructureCommand(building="barracks"),))
+
+        with self.assertRaisesRegex(PlanValidationError, "before a supply depot"):
+            validate_strategy_plan(plan, _state(minerals=150))
+
+    def test_rejects_build_without_enough_minerals(self):
+        plan = StrategyPlan(actions=(BuildStructureCommand(building="supply_depot"),))
+
+        with self.assertRaisesRegex(PlanValidationError, "only 50 minerals"):
+            validate_strategy_plan(plan, _state(minerals=50))
 
     def test_rejects_too_many_trains_after_resource_simulation(self):
         plan = StrategyPlan(
@@ -51,6 +88,12 @@ class PlanValidatorTest(unittest.TestCase):
         with self.assertRaisesRegex(PlanValidationError, "outside"):
             validate_strategy_plan(plan)
 
+    def test_rejects_unsafe_attack_coordinate(self):
+        plan = StrategyPlan(actions=(AttackMoveCommand(unit="marine", x=-1, y=42),))
+
+        with self.assertRaisesRegex(PlanValidationError, "outside"):
+            validate_strategy_plan(plan)
+
     def test_rejects_too_long_wait(self):
         plan = StrategyPlan(actions=(WaitCommand(seconds=60),))
 
@@ -58,13 +101,13 @@ class PlanValidatorTest(unittest.TestCase):
             validate_strategy_plan(plan)
 
     def test_rejects_too_many_actions(self):
-        plan = StrategyPlan(actions=tuple(WaitCommand(seconds=0) for _ in range(9)))
+        plan = StrategyPlan(actions=tuple(WaitCommand(seconds=0) for _ in range(11)))
 
         with self.assertRaisesRegex(PlanValidationError, "too many"):
             validate_strategy_plan(plan)
 
 
-def _state(minerals=50, supply_left=5, workers=8, townhalls=1):
+def _state(minerals=50, supply_left=5, workers=8, townhalls=1, structures=None):
     return GameStateSummary(
         minerals=minerals,
         vespene=0,
@@ -72,6 +115,7 @@ def _state(minerals=50, supply_left=5, workers=8, townhalls=1):
         workers=workers,
         townhalls=townhalls,
         army={},
+        structures=structures or {"commandcenter": 1},
         known_enemy_units=0,
         game_time_seconds=0.0,
     )

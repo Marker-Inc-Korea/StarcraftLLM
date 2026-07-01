@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -24,6 +24,7 @@ class GameStateSummary:
     army: dict[str, int]
     known_enemy_units: int
     game_time_seconds: float
+    structures: dict[str, int] = field(default_factory=dict)
 
 
 def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
@@ -38,6 +39,7 @@ def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
         "workers": summary.workers,
         "townhalls": summary.townhalls,
         "army": dict(sorted(summary.army.items())),
+        "structures": dict(sorted(summary.structures.items())),
         "known_enemy_units": summary.known_enemy_units,
         "game_time_seconds": summary.game_time_seconds,
     }

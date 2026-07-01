@@ -24,6 +24,8 @@ from starcraft_llm.planner import (
     plan_strategy,
 )
 from starcraft_llm.strategy import (
+    AttackMoveCommand,
+    BuildStructureCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
@@ -115,6 +117,11 @@ def summarize_bot_state(bot) -> GameStateSummary:
         name = _unit_type_name(unit)
         army[name] = army.get(name, 0) + 1
 
+    structures: dict[str, int] = {}
+    for structure in getattr(bot, "structures", bot.townhalls):
+        name = _unit_type_name(structure)
+        structures[name] = structures.get(name, 0) + 1
+
     return GameStateSummary(
         minerals=int(bot.minerals),
         vespene=int(bot.vespene),
@@ -128,6 +135,7 @@ def summarize_bot_state(bot) -> GameStateSummary:
         army=army,
         known_enemy_units=len(bot.enemy_units),
         game_time_seconds=float(getattr(bot, "time", 0.0)),
+        structures=structures,
     )
 
 
@@ -177,7 +185,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                         self._left_game = True
                         await self.client.leave()
                         return
-                self._execute_current_action(iteration)
+                await self._execute_current_action(iteration)
 
             if not self._left_game and self._should_stop():
                 print("MVP complete: strategy plan finished; leaving the game.")
@@ -216,7 +224,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             for index, action in enumerate(self.plan.actions, start=1):
                 print(f"  {index}. {self._describe_action(action)}")
 
-        def _execute_current_action(self, iteration: int) -> None:
+        async def _execute_current_action(self, iteration: int) -> None:
             if self.plan is None:
                 raise RuntimeError("strategy plan is not loaded")
             if self._current_action_index >= len(self.plan.actions):
@@ -227,6 +235,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, MoveCommand):
                 self._execute_move(action, iteration)
                 return
+            if isinstance(action, AttackMoveCommand):
+                self._execute_attack(action, iteration)
+                return
             if isinstance(action, WaitCommand):
                 self._execute_wait(action)
                 return
@@ -235,6 +246,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
             if isinstance(action, TrainUnitCommand):
                 self._execute_train(action, iteration)
+                return
+            if isinstance(action, BuildStructureCommand):
+                await self._execute_build(action, iteration)
                 return
 
             raise TypeError(f"unsupported strategy action: {action!r}")
@@ -252,6 +266,20 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for controllable {command.unit} units...")
+
+        def _execute_attack(self, command: AttackMoveCommand, iteration: int) -> None:
+            target = point2_class((command.x, command.y))
+            units = self._select_units(command.unit)
+            if units:
+                for unit in units:
+                    unit.attack(target)
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued attack command to {len(units)} {command.unit} unit(s): {target}"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for controllable {command.unit} units before attacking...")
 
         def _execute_wait(self, command: WaitCommand) -> None:
             now = asyncio.get_running_loop().time()
@@ -284,28 +312,53 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 print("Waiting for workers and mineral fields before gathering...")
 
         def _execute_train(self, command: TrainUnitCommand, iteration: int) -> None:
-            if command.unit != "scv":
+            if command.unit not in {"scv", "marine"}:
                 raise TypeError(f"unsupported train unit: {command.unit}")
 
-            unit_type = self._unit_type_id().SCV
-            townhalls = self._available_townhalls()
-            if not townhalls:
+            unit_type = self._train_unit_type(command.unit)
+            producers = self._available_producers(command.unit)
+            if not producers:
                 if iteration % 22 == 0:
-                    print("Waiting for an available townhall to train SCV...")
+                    print(f"Waiting for an available producer to train {command.unit}...")
                 return
 
             if hasattr(self, "can_afford") and not self.can_afford(unit_type):
                 if iteration % 22 == 0:
-                    print("Waiting for enough resources to train SCV...")
+                    print(f"Waiting for enough resources to train {command.unit}...")
                 return
 
-            townhall = self._first_unit(townhalls)
-            townhall.train(unit_type)
+            producer = self._first_unit(producers)
+            producer.train(unit_type)
             print(
                 f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
-                "issued train SCV command"
+                f"issued train {command.unit} command"
             )
             self._advance_action()
+
+        async def _execute_build(self, command: BuildStructureCommand, iteration: int) -> None:
+            if command.building not in {"supply_depot", "barracks", "refinery"}:
+                raise TypeError(f"unsupported build structure: {command.building}")
+
+            unit_type = self._building_unit_type(command.building)
+            if hasattr(self, "can_afford") and not self.can_afford(unit_type):
+                if iteration % 22 == 0:
+                    print(f"Waiting for enough resources to build {command.building}...")
+                return
+
+            if command.building == "refinery":
+                issued = self._execute_refinery_build(unit_type)
+            else:
+                near = self._build_near_point()
+                issued = await self.build(unit_type, near=near, max_distance=20)
+
+            if issued:
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued build {command.building} command"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for placement/worker to build {command.building}...")
 
         @staticmethod
         def _closest_mineral_field(mineral_fields, worker):
@@ -320,6 +373,41 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if hasattr(townhalls, "idle"):
                 townhalls = townhalls.idle
             return townhalls
+
+        def _available_producers(self, unit: str):
+            if unit == "scv":
+                return self._available_townhalls()
+
+            barracks = self._structures_of_type(self._unit_type_id().BARRACKS)
+            if hasattr(barracks, "ready"):
+                barracks = barracks.ready
+            if hasattr(barracks, "idle"):
+                barracks = barracks.idle
+            return barracks
+
+        def _structures_of_type(self, unit_type):
+            structures = getattr(self, "structures", [])
+            if hasattr(structures, "of_type"):
+                return structures.of_type({unit_type})
+            return type(structures)([unit for unit in structures if getattr(unit, "type_id", None) == unit_type])
+
+        def _execute_refinery_build(self, unit_type) -> bool:
+            geysers = getattr(self, "vespene_geyser", [])
+            if not geysers:
+                return False
+            townhall = self._first_unit(self.townhalls) if self.townhalls else None
+            geyser = geysers.closest_to(townhall) if townhall is not None and hasattr(geysers, "closest_to") else geysers[0]
+            worker = self.select_build_worker(geyser) if hasattr(self, "select_build_worker") else self._first_unit(self.workers)
+            if not worker:
+                return False
+            worker.build(unit_type, geyser)
+            return True
+
+        def _build_near_point(self):
+            if self.townhalls:
+                townhall = self._first_unit(self.townhalls)
+                return getattr(townhall, "position", townhall)
+            return getattr(self, "start_location", point2_class((35, 42)))
 
         @staticmethod
         def _first_unit(units):
@@ -348,6 +436,23 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return marines if marines else self.workers
             return self.workers
 
+        def _train_unit_type(self, unit: str):
+            if unit == "scv":
+                return self._unit_type_id().SCV
+            if unit == "marine":
+                return self._unit_type_id().MARINE
+            raise TypeError(f"unsupported train unit: {unit}")
+
+        def _building_unit_type(self, building: str):
+            unit_type_id = self._unit_type_id()
+            if building == "supply_depot":
+                return unit_type_id.SUPPLYDEPOT
+            if building == "barracks":
+                return unit_type_id.BARRACKS
+            if building == "refinery":
+                return unit_type_id.REFINERY
+            raise TypeError(f"unsupported build structure: {building}")
+
         @staticmethod
         def _unit_type_id():
             try:
@@ -358,6 +463,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 class _FallbackUnitTypeId:
                     SCV = "SCV"
                     MARINE = "MARINE"
+                    SUPPLYDEPOT = "SUPPLYDEPOT"
+                    BARRACKS = "BARRACKS"
+                    REFINERY = "REFINERY"
 
                 return _FallbackUnitTypeId
 
@@ -371,12 +479,16 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _describe_action(action) -> str:
             if isinstance(action, MoveCommand):
                 return f"move {action.unit} to ({action.x:g}, {action.y:g})"
+            if isinstance(action, AttackMoveCommand):
+                return f"attack with {action.unit} toward ({action.x:g}, {action.y:g})"
             if isinstance(action, WaitCommand):
                 return f"wait {action.seconds:g} second(s)"
             if isinstance(action, GatherMineralsCommand):
                 return f"gather minerals with {action.unit}"
             if isinstance(action, TrainUnitCommand):
                 return f"train {action.unit}"
+            if isinstance(action, BuildStructureCommand):
+                return f"build {action.building}"
             return repr(action)
 
     return _MoveUnitBot

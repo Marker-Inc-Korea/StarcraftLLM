@@ -2,6 +2,8 @@ import json
 import unittest
 
 from starcraft_llm.strategy import (
+    AttackMoveCommand,
+    BuildStructureCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyParseError,
@@ -61,20 +63,24 @@ class StrategyParserTest(unittest.TestCase):
         self.assertEqual(plan.actions[1], WaitCommand(seconds=0))
         self.assertEqual(plan.actions[2], MoveCommand(unit="worker", x=11, y=21))
 
-    def test_parse_gather_and_train_actions(self):
-        plan = parse_strategy_plan("gather minerals; train scv")
+    def test_parse_gather_train_build_and_attack_actions(self):
+        plan = parse_strategy_plan("gather minerals; train scv; train marine; build supply depot; build barracks; attack marine 55 45")
 
         self.assertEqual(
             plan.actions,
             (
                 GatherMineralsCommand(unit="worker"),
                 TrainUnitCommand(unit="scv"),
+                TrainUnitCommand(unit="marine"),
+                BuildStructureCommand(building="supply_depot"),
+                BuildStructureCommand(building="barracks"),
+                AttackMoveCommand(unit="marine", x=55, y=45),
             ),
         )
 
     def test_parse_json_strategy_plan(self):
         plan = parse_strategy_plan_json(
-            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"}]}'
+            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"},{"type":"build","building":"supply_depot"},{"type":"attack","unit":"marine","x":55,"y":45}]}'
         )
 
         self.assertEqual(
@@ -85,6 +91,8 @@ class StrategyParserTest(unittest.TestCase):
                     WaitCommand(seconds=1),
                     GatherMineralsCommand(unit="worker"),
                     TrainUnitCommand(unit="scv"),
+                    BuildStructureCommand(building="supply_depot"),
+                    AttackMoveCommand(unit="marine", x=55, y=45),
                 )
             ),
         )
@@ -101,6 +109,8 @@ class StrategyParserTest(unittest.TestCase):
                 WaitCommand(seconds=1),
                 GatherMineralsCommand(unit="worker"),
                 TrainUnitCommand(unit="scv"),
+                BuildStructureCommand(building="supply_depot"),
+                AttackMoveCommand(unit="marine", x=55, y=45),
             )
         )
 
@@ -116,6 +126,8 @@ class StrategyParserTest(unittest.TestCase):
                     {"type": "wait", "seconds": 1},
                     {"type": "gather", "unit": "worker", "resource": "minerals"},
                     {"type": "train", "unit": "scv"},
+                    {"type": "build", "building": "supply_depot", "worker": "worker"},
+                    {"type": "attack", "unit": "marine", "x": 55, "y": 45},
                 ]
             },
         )
@@ -154,9 +166,14 @@ class StrategyParserTest(unittest.TestCase):
         with self.assertRaises(StrategyParseError):
             parse_strategy("wait 1")
 
+    def test_parse_attack_move_command(self):
+        plan = parse_strategy_plan("attack move marine 55 45")
+
+        self.assertEqual(plan.actions, (AttackMoveCommand(unit="marine", x=55, y=45),))
+
     def test_rejects_unsupported_command(self):
         with self.assertRaises(StrategyParseError):
-            parse_strategy("attack worker 35 42")
+            parse_strategy_plan("expand natural")
 
     def test_rejects_negative_wait(self):
         with self.assertRaises(StrategyParseError):
@@ -165,10 +182,12 @@ class StrategyParserTest(unittest.TestCase):
     def test_parse_strategy_request_accepts_resource_and_train_intents(self):
         self.assertEqual(parse_strategy_request("미네랄 캐").actions, (GatherMineralsCommand(unit="worker"),))
         self.assertEqual(parse_strategy_request("train scv").actions, (TrainUnitCommand(unit="scv"),))
+        self.assertEqual(parse_strategy_request("마린 생산").actions, (TrainUnitCommand(unit="marine"),))
+        self.assertEqual(parse_strategy_request("보급고 건설").actions, (BuildStructureCommand(building="supply_depot"),))
 
     def test_rejects_unknown_json_action(self):
         with self.assertRaises(StrategyParseError):
-            parse_strategy_plan_json('{"actions":[{"type":"attack"}]}')
+            parse_strategy_plan_json('{"actions":[{"type":"warp"}]}')
 
     def test_rejects_unknown_intent(self):
         with self.assertRaises(StrategyParseError):

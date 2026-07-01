@@ -24,6 +24,8 @@ python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼
 python scripts/run_sc2_movement.py --planner gemini --observe-before-plan --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --fast --stop-after 1
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
+python scripts/run_sc2_movement.py --strategy "gather minerals; wait 10; build supply depot" --fast --stop-after 1
+python scripts/run_sc2_movement.py --strategy "build barracks; train marine; attack marine 55 45" --print-plan
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
 python scripts/run_sc2_movement.py --print-state --fast
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해"
@@ -48,6 +50,12 @@ wait 1
 gather minerals
 gather worker minerals
 train scv
+train marine
+build supply depot
+build barracks
+build refinery
+attack marine 55 45
+attack move marine 55 45
 ```
 
 Multiple actions can be separated by semicolons, newlines, or `then`:
@@ -74,7 +82,10 @@ The same plan can be provided as JSON, which is the intended future LLM output c
     {"type": "wait", "seconds": 1},
     {"type": "move", "unit": "worker", "x": 45, "y": 42},
     {"type": "gather", "unit": "worker", "resource": "minerals"},
-    {"type": "train", "unit": "scv"}
+    {"type": "train", "unit": "scv"},
+    {"type": "build", "building": "supply_depot", "worker": "worker"},
+    {"type": "train", "unit": "marine"},
+    {"type": "attack", "unit": "marine", "x": 55, "y": 45}
   ]
 }
 ```
@@ -123,6 +134,7 @@ Example state summary:
   "workers": 12,
   "townhalls": 1,
   "army": {},
+  "structures": {"commandcenter": 1},
   "known_enemy_units": 0,
   "game_time_seconds": 0.0
 }
@@ -172,18 +184,18 @@ Implemented now:
 
 - browser `Unit.moveTo(x, y)` movement logic;
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
-- real SC2 `move worker/marine x y`, `wait seconds`, `gather minerals`, and `train scv` strategy-plan parser;
+- real SC2 `move`, `attack`, `wait`, `gather minerals`, `train scv/marine`, and `build supply depot/barracks/refinery` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
 - planner interface with a fixed default `rule` planner, Gemini API planner, observe-before-plan state context, and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
-- `--print-state` game-state summary JSON and `--observe-before-plan` live state-aware planning;
+- `--print-state` game-state summary JSON with army/structure counts and `--observe-before-plan` live state-aware planning;
 - `PlanValidator` safety checks before executing generated plans;
 - local detection for common macOS SC2 install paths.
 
 Not implemented yet:
 
-- full build-order or combat strategy execution beyond one-step SCV training;
+- robust multi-building placement strategy, add-ons, upgrades, expansions, and production queues;
 - implemented `openai` or `server` planner integrations;
 - multi-cycle closed-loop replanning from live game state;
 - computer vision;

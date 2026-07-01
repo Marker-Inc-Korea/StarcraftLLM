@@ -4,7 +4,15 @@ import io
 import unittest
 
 from starcraft_llm.sc2_bot import create_game_state_bot_class, create_move_unit_bot_class, summarize_bot_state
-from starcraft_llm.strategy import GatherMineralsCommand, MoveCommand, StrategyPlan, TrainUnitCommand, WaitCommand
+from starcraft_llm.strategy import (
+    AttackMoveCommand,
+    BuildStructureCommand,
+    GatherMineralsCommand,
+    MoveCommand,
+    StrategyPlan,
+    TrainUnitCommand,
+    WaitCommand,
+)
 
 
 class FakeClient:
@@ -20,22 +28,37 @@ class FakeTypeId:
     def __init__(self, name):
         self.name = name
 
+    def __eq__(self, other):
+        return getattr(other, "name", other) == self.name
+
+    def __hash__(self):
+        return hash(self.name)
+
 
 class FakeUnit:
     def __init__(self, type_name="SCV"):
         self.type_id = FakeTypeId(type_name)
+        self.position = (35, 42)
         self.targets = []
+        self.attack_targets = []
         self.gather_targets = []
         self.trained_units = []
+        self.build_orders = []
 
     def move(self, target):
         self.targets.append(target)
+
+    def attack(self, target):
+        self.attack_targets.append(target)
 
     def gather(self, target):
         self.gather_targets.append(target)
 
     def train(self, unit_type):
         self.trained_units.append(unit_type)
+
+    def build(self, unit_type, target):
+        self.build_orders.append((unit_type, target))
 
 
 class FakeUnits(list):
@@ -51,8 +74,8 @@ class FakeUnits(list):
     def first(self):
         return self[0]
 
-    def of_type(self, _unit_types):
-        return FakeUnits()
+    def of_type(self, unit_types):
+        return FakeUnits([unit for unit in self if unit.type_id in unit_types or unit.type_id.name in unit_types])
 
     def closest_to(self, _unit):
         return self[0]
@@ -63,9 +86,12 @@ class FakeBotAI:
         self.client = FakeClient()
         self.workers = FakeUnits([FakeUnit(), FakeUnit()])
         self.townhalls = FakeUnits([FakeUnit("COMMANDCENTER")])
+        self.structures = FakeUnits([self.townhalls[0]])
         self.units = FakeUnits()
         self.enemy_units = FakeUnits()
         self.mineral_field = FakeUnits([FakeUnit("MINERALFIELD")])
+        self.vespene_geyser = FakeUnits([FakeUnit("VESPENEGEYSER")])
+        self.build_orders = []
         self.minerals = 50
         self.vespene = 0
         self.supply_used = 12
@@ -75,6 +101,14 @@ class FakeBotAI:
 
     def can_afford(self, _unit_type):
         return True
+
+    async def build(self, unit_type, near, max_distance=20):
+        self.build_orders.append((unit_type, near, max_distance))
+        self.structures.append(FakeUnit(getattr(unit_type, "name", unit_type)))
+        return True
+
+    def select_build_worker(self, _target):
+        return self.workers[0]
 
 
 class GameStateBotTest(unittest.TestCase):
@@ -94,6 +128,7 @@ class GameStateBotTest(unittest.TestCase):
         self.assertEqual(summary.workers, 2)
         self.assertEqual(summary.townhalls, 1)
         self.assertEqual(summary.army, {"marine": 1})
+        self.assertEqual(summary.structures, {"commandcenter": 1})
         self.assertEqual(summary.known_enemy_units, 1)
         self.assertEqual(summary.game_time_seconds, 7.25)
 
@@ -136,6 +171,55 @@ class StrategyPlanBotTest(unittest.TestCase):
         self.assertEqual(bot.workers[0].gather_targets, [mineral])
         self.assertEqual(bot.workers[1].gather_targets, [mineral])
         self.assertEqual(len(bot.townhalls[0].trained_units), 1)
+        self.assertTrue(bot.client.left)
+
+
+    def test_bot_executes_build_train_marine_and_attack_actions(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                BuildStructureCommand(building="supply_depot"),
+                BuildStructureCommand(building="barracks"),
+                TrainUnitCommand(unit="marine"),
+                AttackMoveCommand(unit="marine", x=55, y=45),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+        barracks = FakeUnit("BARRACKS")
+        marine = FakeUnit("MARINE")
+        bot.structures.append(barracks)
+        bot.units.append(marine)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            await bot.on_step(2)
+            await bot.on_step(3)
+            await bot.on_step(4)
+            await bot.on_step(5)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertGreaterEqual(len(bot.build_orders), 2)
+        self.assertEqual(len(barracks.trained_units), 1)
+        self.assertEqual(marine.attack_targets, [(55, 45)])
+        self.assertTrue(bot.client.left)
+
+    def test_bot_executes_refinery_build_with_worker(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(actions=(BuildStructureCommand(building="refinery"),))
+        bot = bot_class(plan, stop_after_seconds=0)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            await bot.on_step(2)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertEqual(bot.workers[0].build_orders, [("REFINERY", bot.vespene_geyser[0])])
         self.assertTrue(bot.client.left)
 
     def test_bot_observes_state_before_planning(self):
