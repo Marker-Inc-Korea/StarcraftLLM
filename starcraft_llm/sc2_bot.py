@@ -31,6 +31,7 @@ from starcraft_llm.strategy import (
     WaitCommand,
     strategy_plan_to_json,
 )
+from starcraft_llm.validator import PlanValidationError, validate_strategy_plan
 
 DEFAULT_MAP = "AbyssalReefLE"
 DEFAULT_STRATEGY = "move worker 35 42"
@@ -138,10 +139,21 @@ def _unit_type_name(unit) -> str:
 
 def create_move_unit_bot_class(bot_ai_base, point2_class):
     class _MoveUnitBot(bot_ai_base):
-        def __init__(self, plan: StrategyPlan, stop_after_seconds: int = 35):
+        def __init__(
+            self,
+            plan: StrategyPlan | None = None,
+            stop_after_seconds: int = 35,
+            strategy: str | None = None,
+            planner_name: str = DEFAULT_PLANNER,
+            observe_before_plan: bool = False,
+        ):
             super().__init__()
             self.plan = plan
             self.stop_after_seconds = stop_after_seconds
+            self.strategy = strategy
+            self.planner_name = planner_name
+            self.observe_before_plan = observe_before_plan
+            self.observed_summary: GameStateSummary | None = None
             self._current_action_index = 0
             self._action_started_at_loop_time: float | None = None
             self._plan_finished_at_loop_time: float | None = None
@@ -149,12 +161,22 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
 
         async def on_start(self):
             self.client.game_step = 2
-            print(f"Strategy plan loaded: {len(self.plan.actions)} action(s)")
-            for index, action in enumerate(self.plan.actions, start=1):
-                print(f"  {index}. {self._describe_action(action)}")
+            if self.plan is None:
+                print("Observing game state before planning...")
+            else:
+                self._print_plan_loaded()
 
         async def on_step(self, iteration: int):
             if self._plan_finished_at_loop_time is None:
+                if self.plan is None:
+                    try:
+                        if not self._create_plan_from_observation():
+                            return
+                    except (PlanValidationError, PlannerError, PlannerUnavailableError, ValueError) as exc:
+                        print(f"Planner error: {exc}", file=sys.stderr)
+                        self._left_game = True
+                        await self.client.leave()
+                        return
                 self._execute_current_action(iteration)
 
             if not self._left_game and self._should_stop():
@@ -162,7 +184,41 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._left_game = True
                 await self.client.leave()
 
+        def _create_plan_from_observation(self) -> bool:
+            if not self.observe_before_plan:
+                raise RuntimeError("strategy plan is not loaded and observe-before-plan is disabled")
+            if not self.strategy:
+                raise RuntimeError("strategy text is required for observe-before-plan")
+
+            self.observed_summary = summarize_bot_state(self)
+            print(
+                "Observed game state before planning: "
+                f"minerals={self.observed_summary.minerals}, "
+                f"supply_left={self.observed_summary.supply.left}, "
+                f"workers={self.observed_summary.workers}, "
+                f"townhalls={self.observed_summary.townhalls}"
+            )
+            self.plan = validate_strategy_plan(
+                plan_strategy(
+                    self.strategy,
+                    planner_name=self.planner_name,
+                    game_state=self.observed_summary,
+                ),
+                game_state=self.observed_summary,
+            )
+            self._print_plan_loaded()
+            return True
+
+        def _print_plan_loaded(self) -> None:
+            if self.plan is None:
+                return
+            print(f"Strategy plan loaded: {len(self.plan.actions)} action(s)")
+            for index, action in enumerate(self.plan.actions, start=1):
+                print(f"  {index}. {self._describe_action(action)}")
+
         def _execute_current_action(self, iteration: int) -> None:
+            if self.plan is None:
+                raise RuntimeError("strategy plan is not loaded")
             if self._current_action_index >= len(self.plan.actions):
                 self._mark_plan_finished()
                 return
@@ -274,6 +330,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _advance_action(self) -> None:
             self._current_action_index += 1
             self._action_started_at_loop_time = None
+            if self.plan is None:
+                raise RuntimeError("strategy plan is not loaded")
             if self._current_action_index >= len(self.plan.actions):
                 self._mark_plan_finished()
 
@@ -389,10 +447,13 @@ def run_real_game(
     realtime: bool,
     stop_after_seconds: int,
     planner_name: str = DEFAULT_PLANNER,
+    observe_before_plan: bool = False,
 ) -> None:
     """Start StarCraft II and run the minimal movement bot."""
 
-    plan = plan_strategy(strategy, planner_name=planner_name)
+    plan = None
+    if not observe_before_plan:
+        plan = validate_strategy_plan(plan_strategy(strategy, planner_name=planner_name))
     maps, BotAI, Difficulty, Race, run_game, Bot, Computer, Point2 = _import_sc2_runtime()
     bot_class = create_move_unit_bot_class(BotAI, Point2)
     try:
@@ -405,7 +466,16 @@ def run_real_game(
         run_game(
             selected_map,
             [
-                Bot(Race.Terran, bot_class(plan, stop_after_seconds=stop_after_seconds)),
+                Bot(
+                    Race.Terran,
+                    bot_class(
+                        plan,
+                        stop_after_seconds=stop_after_seconds,
+                        strategy=strategy,
+                        planner_name=planner_name,
+                        observe_before_plan=observe_before_plan,
+                    ),
+                ),
                 Computer(Race.Zerg, Difficulty.VeryEasy),
             ],
             realtime=realtime,
@@ -452,6 +522,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--stop-after", type=int, default=35, help="Seconds to keep the game open after issuing move.")
     parser.add_argument("--fast", action="store_true", help="Run non-realtime for faster automated checks.")
+    parser.add_argument(
+        "--observe-before-plan",
+        action="store_true",
+        help="Start SC2, summarize the initial game state, pass it to the planner, validate the plan, then execute it.",
+    )
     parser.add_argument("--check", action="store_true", help="Only check local SC2 installation hints; do not start the game.")
     parser.add_argument(
         "--print-plan",
@@ -492,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.print_plan:
         try:
             plan = plan_strategy(args.strategy, planner_name=args.planner)
-        except (PlannerError, PlannerUnavailableError, ValueError) as exc:
+        except (PlanValidationError, PlannerError, PlannerUnavailableError, ValueError) as exc:
             print(f"Planner error: {exc}", file=sys.stderr)
             return 2
         print(strategy_plan_to_json(plan))
@@ -514,8 +589,9 @@ def main(argv: list[str] | None = None) -> int:
             realtime=not args.fast,
             stop_after_seconds=args.stop_after,
             planner_name=args.planner,
+            observe_before_plan=args.observe_before_plan,
         )
-    except (PlannerError, PlannerUnavailableError, ValueError) as exc:
+    except (PlanValidationError, PlannerError, PlannerUnavailableError, ValueError) as exc:
         print(f"Planner error: {exc}", file=sys.stderr)
         return 2
     return 0

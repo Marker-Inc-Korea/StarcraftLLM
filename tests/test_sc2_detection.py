@@ -53,6 +53,11 @@ class Sc2DetectionTest(unittest.TestCase):
 
         self.assertTrue(args.print_state)
 
+    def test_observe_before_plan_argument_parses(self):
+        args = build_arg_parser().parse_args(["--observe-before-plan"])
+
+        self.assertTrue(args.observe_before_plan)
+
     def test_print_plan_does_not_require_sc2_maps(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             sc2_path = Path(temp_dir) / "StarCraft II"

@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from starcraft_llm.game_state import GameStateSummary, SupplySummary
 from starcraft_llm.planner import (
     DEFAULT_PLANNER,
     GeminiPlanner,
@@ -100,6 +101,34 @@ class PlannerInterfaceTest(unittest.TestCase):
 
         self.assertEqual(plan.actions, (TrainUnitCommand(unit="scv"),))
 
+
+    def test_gemini_planner_prompt_includes_game_state(self):
+        captured = {}
+
+        def fake_post(url, headers, payload, timeout):
+            captured["payload"] = payload
+            return {"output_text": '{"actions":[{"type":"gather","unit":"worker","resource":"minerals"}]}'}
+
+        planner = GeminiPlanner(api_key="test-key", http_post=fake_post)
+        planner.create_plan(
+            _request(
+                "경제를 키워",
+                game_state=GameStateSummary(
+                    minerals=50,
+                    vespene=0,
+                    supply=SupplySummary(used=8, cap=13, left=5),
+                    workers=8,
+                    townhalls=1,
+                    army={},
+                    known_enemy_units=0,
+                    game_time_seconds=0.0,
+                ),
+            )
+        )
+
+        self.assertIn('"minerals": 50', captured["payload"]["input"])
+        self.assertIn('"workers": 8', captured["payload"]["input"])
+
     def test_gemini_api_key_prefers_environment(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             key_file = Path(temp_dir) / "gemini_api_key.txt"
@@ -134,10 +163,10 @@ class PlannerInterfaceTest(unittest.TestCase):
             create_planner("unknown")
 
 
-def _request(strategy):
+def _request(strategy, game_state=None):
     from starcraft_llm.planner import PlannerRequest
 
-    return PlannerRequest(strategy=strategy)
+    return PlannerRequest(strategy=strategy, game_state=game_state)
 
 
 if __name__ == "__main__":

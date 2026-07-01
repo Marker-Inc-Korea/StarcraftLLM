@@ -138,6 +138,55 @@ class StrategyPlanBotTest(unittest.TestCase):
         self.assertEqual(len(bot.townhalls[0].trained_units), 1)
         self.assertTrue(bot.client.left)
 
+    def test_bot_observes_state_before_planning(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        bot = bot_class(
+            None,
+            stop_after_seconds=0,
+            strategy="train scv; gather minerals",
+            planner_name="rule",
+            observe_before_plan=True,
+        )
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            await bot.on_step(2)
+            await bot.on_step(3)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertIsNotNone(bot.observed_summary)
+        self.assertIsNotNone(bot.plan)
+        self.assertEqual(len(bot.townhalls[0].trained_units), 1)
+        self.assertEqual(bot.workers[0].gather_targets, [bot.mineral_field[0]])
+        self.assertTrue(bot.client.left)
+
+    def test_bot_leaves_without_executing_invalid_observed_plan(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        bot = bot_class(
+            None,
+            stop_after_seconds=0,
+            strategy="train scv",
+            planner_name="rule",
+            observe_before_plan=True,
+        )
+        bot.minerals = 25
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            asyncio.run(run_plan())
+
+        self.assertIn("Planner error", stderr.getvalue())
+        self.assertEqual(bot.townhalls[0].trained_units, [])
+        self.assertTrue(bot.client.left)
+
     def test_bot_executes_move_wait_move_plan_in_order(self):
         bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
         plan = StrategyPlan(

@@ -21,6 +21,7 @@ python scripts/run_sc2_movement.py --check
 python scripts/run_sc2_movement.py --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --planner rule --strategy "move worker 35 42"
 python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
+python scripts/run_sc2_movement.py --planner gemini --observe-before-plan --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --fast --stop-after 1
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
@@ -60,6 +61,10 @@ This deterministic plan format is the next integration seam for an LLM: the plan
 
 Planner mode is explicit. The default is fixed to `--planner rule`, which uses the local deterministic parser/intent translator. Other modes do not run as fallbacks; they must be selected explicitly. `--planner gemini` calls the Gemini API and must succeed on its own. `--planner openai` and `--planner server` are reserved interface modes and currently fail with a clear “not implemented yet” message until those integrations are added.
 
+Use `--observe-before-plan` to start SC2 first, capture the initial `GameStateSummary`, pass that state to the selected planner, validate the returned plan, and only then execute it. Without this option, the planner runs before SC2 starts and receives no live game-state context.
+
+Every executable plan passes through `PlanValidator` before the bot runs it. The validator keeps the MVP safe by checking action count, move coordinate sanity, wait limits, worker availability for gathering, and simple SCV-training feasibility such as minerals, supply, and townhall availability when game state is known.
+
 The same plan can be provided as JSON, which is the intended future LLM output contract:
 
 ```json
@@ -92,6 +97,7 @@ Provide the API key with an environment variable:
 ```bash
 export GEMINI_API_KEY="your-key-here"
 python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
+python scripts/run_sc2_movement.py --planner gemini --observe-before-plan --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --fast --stop-after 1
 ```
 
 For local-only testing, you can also store the key in a git-ignored file:
@@ -100,6 +106,7 @@ For local-only testing, you can also store the key in a git-ignored file:
 mkdir -p .secrets
 printf "%s" "your-key-here" > .secrets/gemini_api_key.txt
 python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --print-plan
+python scripts/run_sc2_movement.py --planner gemini --observe-before-plan --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --fast --stop-after 1
 ```
 
 `.secrets/` is ignored by git. Do not commit API keys, screenshots containing keys, or terminal logs that print keys.
@@ -167,16 +174,17 @@ Implemented now:
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
 - real SC2 `move worker/marine x y`, `wait seconds`, `gather minerals`, and `train scv` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
-- planner interface with a fixed default `rule` planner, Gemini API planner, and explicit future `openai`/`server` modes;
+- planner interface with a fixed default `rule` planner, Gemini API planner, observe-before-plan state context, and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
 - real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
-- `--print-state` game-state summary JSON for future LLM observation input;
+- `--print-state` game-state summary JSON and `--observe-before-plan` live state-aware planning;
+- `PlanValidator` safety checks before executing generated plans;
 - local detection for common macOS SC2 install paths.
 
 Not implemented yet:
 
 - full build-order or combat strategy execution beyond one-step SCV training;
 - implemented `openai` or `server` planner integrations;
-- closed-loop replanning from live game state;
+- multi-cycle closed-loop replanning from live game state;
 - computer vision;
 - Brood War/BWAPI integration.
