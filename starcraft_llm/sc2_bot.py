@@ -24,8 +24,10 @@ from starcraft_llm.planner import (
     plan_strategy,
 )
 from starcraft_llm.strategy import (
+    AttackEnemyCommand,
     AttackMoveCommand,
     BuildStructureCommand,
+    GatherGasCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
@@ -258,6 +260,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, AttackMoveCommand):
                 self._execute_attack(action, iteration)
                 return
+            if isinstance(action, AttackEnemyCommand):
+                self._execute_attack_enemy(action, iteration)
+                return
             if isinstance(action, WaitCommand):
                 self._execute_wait(action)
                 return
@@ -266,6 +271,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
             if isinstance(action, GatherMineralsCommand):
                 self._execute_gather_minerals(action, iteration)
+                return
+            if isinstance(action, GatherGasCommand):
+                self._execute_gather_gas(action, iteration)
                 return
             if isinstance(action, TrainUnitCommand):
                 self._execute_train(action, iteration)
@@ -303,6 +311,21 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for controllable {command.unit} units before attacking...")
+
+        def _execute_attack_enemy(self, command: AttackEnemyCommand, iteration: int) -> None:
+            units = self._select_exact_units(command.unit)
+            enemies = self.enemy_units
+            if units and enemies:
+                target = self._closest_enemy(enemies, self._first_unit(units))
+                for unit in units:
+                    unit.attack(target)
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued attack command to {len(units)} {command.unit} unit(s) against visible enemy"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for controllable {command.unit} units and visible enemies before attacking...")
 
         def _execute_wait(self, command: WaitCommand) -> None:
             now = asyncio.get_running_loop().time()
@@ -353,9 +376,35 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             elif iteration % 22 == 0:
                 print("Waiting for workers and mineral fields before gathering...")
 
+        def _execute_gather_gas(self, command: GatherGasCommand, iteration: int) -> None:
+            workers = self._select_units(command.unit)
+            refineries = self._ready_refineries()
+            if workers and refineries:
+                issued = 0
+                max_workers = min(len(workers), len(refineries) * 3)
+                for index, worker in enumerate(workers[:max_workers]):
+                    refinery = refineries[index % len(refineries)]
+                    worker.gather(refinery)
+                    issued += 1
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"issued gather gas command to {issued} worker unit(s)"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print("Waiting for workers and ready refineries before gathering gas...")
+
         def _execute_train(self, command: TrainUnitCommand, iteration: int) -> None:
             if command.unit not in {"scv", "marine"}:
                 raise TypeError(f"unsupported train unit: {command.unit}")
+            if command.count < 1:
+                raise TypeError(f"unsupported train count: {command.count}")
+            if not self._action_context:
+                self._action_context = {"issued": 0}
+            issued_count = int(self._action_context.get("issued", 0))
+            if issued_count >= command.count:
+                self._advance_action()
+                return
 
             unit_type = self._train_unit_type(command.unit)
             producers = self._available_producers(command.unit)
@@ -371,11 +420,14 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
 
             producer = self._first_unit(producers)
             producer.train(unit_type)
+            issued_count += 1
+            self._action_context["issued"] = issued_count
             print(
                 f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
-                f"issued train {command.unit} command"
+                f"issued train {command.unit} command ({issued_count}/{command.count})"
             )
-            self._advance_action()
+            if issued_count >= command.count:
+                self._advance_action()
 
         async def _execute_build(self, command: BuildStructureCommand, iteration: int) -> None:
             if command.building not in {"supply_depot", "barracks", "refinery"}:
@@ -436,6 +488,12 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return mineral_fields.closest_to(worker)
             return mineral_fields[0]
 
+        @staticmethod
+        def _closest_enemy(enemies, unit):
+            if hasattr(enemies, "closest_to"):
+                return enemies.closest_to(unit)
+            return enemies[0]
+
         def _available_townhalls(self):
             townhalls = self.townhalls
             if hasattr(townhalls, "ready"):
@@ -460,6 +518,12 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if hasattr(structures, "of_type"):
                 return structures.of_type({unit_type})
             return type(structures)([unit for unit in structures if getattr(unit, "type_id", None) == unit_type])
+
+        def _ready_refineries(self):
+            refineries = self._structures_of_type(self._unit_type_id().REFINERY)
+            if hasattr(refineries, "ready"):
+                refineries = refineries.ready
+            return refineries
 
         def _structure_count(self, building: str, readiness: str = "total") -> int:
             structures = self._structures_of_type(self._building_unit_type(building))
@@ -538,6 +602,13 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return marines if marines else self.workers
             return self.workers
 
+        def _select_exact_units(self, unit: str):
+            if unit == "worker":
+                return self.workers
+            if unit == "marine":
+                return self.units.of_type({self._unit_type_id().MARINE})
+            return []
+
         def _train_unit_type(self, unit: str):
             if unit == "scv":
                 return self._unit_type_id().SCV
@@ -583,6 +654,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"move {action.unit} to ({action.x:g}, {action.y:g})"
             if isinstance(action, AttackMoveCommand):
                 return f"attack with {action.unit} toward ({action.x:g}, {action.y:g})"
+            if isinstance(action, AttackEnemyCommand):
+                return f"attack visible enemy with {action.unit}"
             if isinstance(action, WaitCommand):
                 return f"wait {action.seconds:g} second(s)"
             if isinstance(action, WaitUntilCommand):
@@ -590,8 +663,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"{action.condition}{target} >= {action.at_least:g}"
             if isinstance(action, GatherMineralsCommand):
                 return f"gather minerals with {action.unit}"
+            if isinstance(action, GatherGasCommand):
+                return f"gather gas with {action.unit}"
             if isinstance(action, TrainUnitCommand):
-                return f"train {action.unit}"
+                return f"train {action.unit}" if action.count == 1 else f"train {action.count} {action.unit}"
             if isinstance(action, BuildStructureCommand):
                 return f"build {action.building}"
             return repr(action)

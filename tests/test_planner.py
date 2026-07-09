@@ -71,6 +71,9 @@ class PlannerInterfaceTest(unittest.TestCase):
         self.assertIn("early economy", captured["payload"]["input"])
         self.assertIn("wait_until", captured["payload"]["input"])
         self.assertIn("structures_ready", captured["payload"]["input"])
+        self.assertIn("attack_enemy", captured["payload"]["input"])
+        self.assertIn("gather gas", captured["payload"]["input"])
+        self.assertIn("count?:integer", captured["payload"]["input"])
 
     def test_gemini_planner_accepts_plan_alias_from_model_output(self):
         def fake_post(url, headers, payload, timeout):

@@ -25,6 +25,13 @@ class AttackMoveCommand:
 
 
 @dataclass(frozen=True)
+class AttackEnemyCommand:
+    """Attack the nearest currently visible enemy with one logical unit group."""
+
+    unit: str = "marine"
+
+
+@dataclass(frozen=True)
 class WaitCommand:
     """Pause strategy execution for a small amount of game-clock time."""
 
@@ -48,10 +55,18 @@ class GatherMineralsCommand:
 
 
 @dataclass(frozen=True)
+class GatherGasCommand:
+    """Send workers to ready refineries for vespene gathering."""
+
+    unit: str = "worker"
+
+
+@dataclass(frozen=True)
 class TrainUnitCommand:
-    """Train one unit from an available production structure."""
+    """Train one or more units from available production structures."""
 
     unit: str
+    count: int = 1
 
 
 @dataclass(frozen=True)
@@ -65,9 +80,11 @@ class BuildStructureCommand:
 StrategyAction: TypeAlias = (
     MoveCommand
     | AttackMoveCommand
+    | AttackEnemyCommand
     | WaitCommand
     | WaitUntilCommand
     | GatherMineralsCommand
+    | GatherGasCommand
     | TrainUnitCommand
     | BuildStructureCommand
 )
@@ -141,13 +158,15 @@ def parse_strategy_plan(text: str, default_unit: str = "worker") -> StrategyPlan
     Supported primitive actions:
     - move worker 35 42
     - attack marine 55 45
+    - attack enemy
     - wait 2
     - wait until minerals 100
     - wait until structure supply depot ready
     - wait until unit marine 1
     - gather minerals
+    - gather gas
     - train scv
-    - train marine
+    - train marine 2
     - build supply depot
     - build barracks
     - build refinery
@@ -195,11 +214,13 @@ def parse_strategy_plan_json(text: str, default_unit: str = "worker") -> Strateg
       "actions": [
         {"type": "move", "unit": "worker", "x": 35, "y": 42},
         {"type": "attack", "unit": "marine", "x": 55, "y": 45},
+        {"type": "attack_enemy", "unit": "marine"},
         {"type": "wait", "seconds": 1},
         {"type": "wait_until", "condition": "minerals", "at_least": 100},
         {"type": "wait_until", "condition": "structure_ready", "target": "supply_depot", "at_least": 1},
         {"type": "gather", "unit": "worker", "resource": "minerals"},
-        {"type": "train", "unit": "scv"},
+        {"type": "gather", "unit": "worker", "resource": "vespene"},
+        {"type": "train", "unit": "scv", "count": 2},
         {"type": "build", "building": "supply_depot"}
       ]
     }
@@ -296,9 +317,13 @@ def _parse_move(parts: list[str], default_unit: str) -> MoveCommand:
     return MoveCommand(unit=unit, x=x, y=y)
 
 
-def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand:
+def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand | AttackEnemyCommand:
     if len(parts) >= 2 and parts[1].lower() == "move":
         parts = [parts[0], *parts[2:]]
+
+    if _is_enemy_attack(parts):
+        unit = normalize_unit(parts[1]) if len(parts) >= 3 and parts[1].lower() != "nearest" else "marine"
+        return AttackEnemyCommand(unit=unit)
 
     if len(parts) == 3:
         unit = default_unit
@@ -311,6 +336,16 @@ def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand:
 
     x, y = _parse_coordinates(x_text, y_text)
     return AttackMoveCommand(unit=unit, x=x, y=y)
+
+
+def _is_enemy_attack(parts: list[str]) -> bool:
+    lowered = [part.lower() for part in parts]
+    return (
+        lowered == ["attack", "enemy"]
+        or lowered == ["attack", "nearest", "enemy"]
+        or (len(lowered) == 3 and lowered[2] in {"enemy", "enemies"})
+        or (len(lowered) == 4 and lowered[2:] == ["nearest", "enemy"])
+    )
 
 
 def _parse_wait(parts: list[str]) -> WaitCommand | WaitUntilCommand:
@@ -397,7 +432,7 @@ def _parse_wait_until_structure(parts: list[str]) -> WaitUntilCommand:
     return WaitUntilCommand(condition=condition, target=normalize_building(building_text), at_least=at_least)
 
 
-def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand:
+def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand | GatherGasCommand:
     if len(parts) == 2:
         unit = default_unit
         resource = parts[1]
@@ -407,20 +442,24 @@ def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand:
     else:
         raise StrategyParseError("use: gather minerals or gather worker minerals")
 
-    if resource.strip().lower() not in {"mineral", "minerals", "미네랄"}:
-        raise StrategyParseError("only mineral gathering is supported in this MVP")
-
     if unit != "worker":
-        raise StrategyParseError("only workers can gather minerals in this MVP")
+        raise StrategyParseError("only workers can gather resources in this MVP")
 
-    return GatherMineralsCommand(unit=unit)
+    normalized_resource = resource.strip().lower()
+    if normalized_resource in {"mineral", "minerals", "미네랄"}:
+        return GatherMineralsCommand(unit=unit)
+    if normalized_resource in {"gas", "vespene", "vespene_gas", "가스", "베스핀"}:
+        return GatherGasCommand(unit=unit)
+
+    raise StrategyParseError("only mineral and gas gathering are supported in this MVP")
 
 
 def _parse_train(parts: list[str]) -> TrainUnitCommand:
-    if len(parts) != 2:
-        raise StrategyParseError("use: train scv or train marine")
+    if len(parts) not in {2, 3}:
+        raise StrategyParseError("use: train scv, train marine, or train marine 2")
 
-    return TrainUnitCommand(unit=normalize_train_unit(parts[1]))
+    count = _parse_positive_int(parts[2], "train count") if len(parts) == 3 else 1
+    return TrainUnitCommand(unit=normalize_train_unit(parts[1]), count=count)
 
 
 def _parse_build(parts: list[str]) -> BuildStructureCommand:
@@ -441,10 +480,16 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         return MoveCommand(unit=unit, x=x, y=y)
 
     if action_type in {"attack", "attack_move", "attack-move"}:
+        target = str(payload.get("target", "")).strip().lower()
+        if target in {"enemy", "nearest_enemy", "nearest enemy"}:
+            return AttackEnemyCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
         unit = normalize_unit(str(payload.get("unit", default_unit)))
         x = _required_number(payload, "x")
         y = _required_number(payload, "y")
         return AttackMoveCommand(unit=unit, x=x, y=y)
+
+    if action_type in {"attack_enemy", "attack-enemy"}:
+        return AttackEnemyCommand(unit=normalize_unit(str(payload.get("unit", "marine"))))
 
     if action_type == "wait":
         seconds = _required_number(payload, "seconds")
@@ -457,15 +502,26 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
 
     if action_type in {"gather", "gather_minerals"}:
         resource = str(payload.get("resource", "minerals")).strip().lower()
-        if resource not in {"mineral", "minerals", "미네랄"}:
-            raise StrategyParseError("only mineral gathering is supported in this MVP")
         unit = normalize_unit(str(payload.get("unit", default_unit)))
         if unit != "worker":
-            raise StrategyParseError("only workers can gather minerals in this MVP")
-        return GatherMineralsCommand(unit=unit)
+            raise StrategyParseError("only workers can gather resources in this MVP")
+        if resource in {"mineral", "minerals", "미네랄"}:
+            return GatherMineralsCommand(unit=unit)
+        if resource in {"gas", "vespene", "vespene_gas", "가스", "베스핀"}:
+            return GatherGasCommand(unit=unit)
+        raise StrategyParseError("only mineral and gas gathering are supported in this MVP")
+
+    if action_type in {"gather_gas", "gather-gas", "gather_vespene"}:
+        unit = normalize_unit(str(payload.get("unit", default_unit)))
+        if unit != "worker":
+            raise StrategyParseError("only workers can gather gas in this MVP")
+        return GatherGasCommand(unit=unit)
 
     if action_type == "train":
-        return TrainUnitCommand(unit=normalize_train_unit(str(payload.get("unit", ""))))
+        return TrainUnitCommand(
+            unit=normalize_train_unit(str(payload.get("unit", ""))),
+            count=_positive_int_from_payload(payload, "count", default=1),
+        )
 
     if action_type == "build":
         return BuildStructureCommand(
@@ -481,6 +537,8 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         return {"type": "move", "unit": action.unit, "x": action.x, "y": action.y}
     if isinstance(action, AttackMoveCommand):
         return {"type": "attack", "unit": action.unit, "x": action.x, "y": action.y}
+    if isinstance(action, AttackEnemyCommand):
+        return {"type": "attack_enemy", "unit": action.unit}
     if isinstance(action, WaitCommand):
         return {"type": "wait", "seconds": action.seconds}
     if isinstance(action, WaitUntilCommand):
@@ -494,8 +552,13 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         return payload
     if isinstance(action, GatherMineralsCommand):
         return {"type": "gather", "unit": action.unit, "resource": "minerals"}
+    if isinstance(action, GatherGasCommand):
+        return {"type": "gather", "unit": action.unit, "resource": "vespene"}
     if isinstance(action, TrainUnitCommand):
-        return {"type": "train", "unit": action.unit}
+        payload: dict[str, object] = {"type": "train", "unit": action.unit}
+        if action.count != 1:
+            payload["count"] = action.count
+        return payload
     if isinstance(action, BuildStructureCommand):
         return {"type": "build", "building": action.building, "worker": action.worker}
     raise TypeError(f"unsupported strategy action: {action!r}")
@@ -537,6 +600,35 @@ def _parse_at_least(value: str) -> float:
     if at_least < 0:
         raise StrategyParseError("wait-until threshold must not be negative")
     return at_least
+
+
+def _parse_positive_int(value: str, field_name: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise StrategyParseError(f"{field_name} must be an integer") from exc
+    if parsed < 1:
+        raise StrategyParseError(f"{field_name} must be at least 1")
+    if parsed > 20:
+        raise StrategyParseError(f"{field_name} is too high for the MVP")
+    return parsed
+
+
+def _positive_int_from_payload(payload: dict[str, Any], key: str, default: int) -> int:
+    if key not in payload:
+        return default
+    value = payload[key]
+    if isinstance(value, bool):
+        raise StrategyParseError(f"strategy JSON field must be an integer: {key}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise StrategyParseError(f"strategy JSON field must be an integer: {key}") from exc
+    if parsed < 1:
+        raise StrategyParseError(f"strategy JSON field must be at least 1: {key}")
+    if parsed > 20:
+        raise StrategyParseError(f"strategy JSON field is too high for the MVP: {key}")
+    return parsed
 
 
 def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:

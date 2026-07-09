@@ -2,8 +2,10 @@ import unittest
 
 from starcraft_llm.game_state import GameStateSummary, SupplySummary
 from starcraft_llm.strategy import (
+    AttackEnemyCommand,
     AttackMoveCommand,
     BuildStructureCommand,
+    GatherGasCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
@@ -24,6 +26,28 @@ class PlanValidatorTest(unittest.TestCase):
         )
 
         self.assertIs(validate_strategy_plan(plan, _state()), plan)
+
+    def test_accepts_gather_gas_with_ready_refinery(self):
+        plan = StrategyPlan(actions=(GatherGasCommand(unit="worker"),))
+
+        self.assertIs(validate_strategy_plan(plan, _state(structures={"commandcenter": 1, "refinery": 1})), plan)
+
+    def test_accepts_train_count_and_attack_enemy(self):
+        plan = StrategyPlan(
+            actions=(
+                TrainUnitCommand(unit="marine", count=2),
+                WaitUntilCommand(condition="unit_count", target="marine", at_least=2),
+                AttackEnemyCommand(unit="marine"),
+            )
+        )
+
+        self.assertIs(
+            validate_strategy_plan(
+                plan,
+                _state(minerals=200, supply_left=3, structures={"commandcenter": 1, "barracks": 1}),
+            ),
+            plan,
+        )
 
     def test_accepts_feasible_build_and_marine_plan_with_game_state(self):
         plan = StrategyPlan(
@@ -125,6 +149,18 @@ class PlanValidatorTest(unittest.TestCase):
 
         with self.assertRaisesRegex(PlanValidationError, "no workers"):
             validate_strategy_plan(plan, _state(workers=0))
+
+    def test_rejects_gather_gas_without_ready_refinery(self):
+        plan = StrategyPlan(actions=(GatherGasCommand(unit="worker"),))
+
+        with self.assertRaisesRegex(PlanValidationError, "ready refinery"):
+            validate_strategy_plan(plan, _state())
+
+    def test_rejects_train_count_without_enough_supply(self):
+        plan = StrategyPlan(actions=(TrainUnitCommand(unit="scv", count=3),))
+
+        with self.assertRaisesRegex(PlanValidationError, "only 2 supply"):
+            validate_strategy_plan(plan, _state(minerals=200, supply_left=2))
 
     def test_rejects_unsafe_move_coordinate(self):
         plan = StrategyPlan(actions=(MoveCommand(unit="worker", x=999, y=42),))

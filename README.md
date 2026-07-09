@@ -55,13 +55,18 @@ wait until structure barracks pending
 wait until unit marine 1
 gather minerals
 gather worker minerals
+gather gas
+gather worker vespene
 train scv
 train marine
+train marine 2
 build supply depot
 build barracks
 build refinery
 attack marine 55 45
 attack move marine 55 45
+attack enemy
+attack marine enemy
 ```
 
 Multiple actions can be separated by semicolons, newlines, or `then`:
@@ -71,6 +76,8 @@ move worker 35 42; wait 1; move worker 45 42
 move worker 35 42 then wait 1 then move worker 45 42
 gather minerals; wait until minerals 100; build supply depot
 build supply depot; wait until structure supply depot ready; build barracks
+build refinery; wait until structure refinery ready; gather gas
+train marine 2; wait until unit marine 2; attack marine enemy
 ```
 
 This deterministic plan format is the next integration seam for an LLM: the planner translates a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
@@ -93,14 +100,15 @@ The same plan can be provided as JSON, which is the intended future LLM output c
     {"type": "wait_until", "condition": "minerals", "at_least": 100},
     {"type": "move", "unit": "worker", "x": 45, "y": 42},
     {"type": "gather", "unit": "worker", "resource": "minerals"},
-    {"type": "train", "unit": "scv"},
+    {"type": "gather", "unit": "worker", "resource": "vespene"},
+    {"type": "train", "unit": "scv", "count": 2},
     {"type": "build", "building": "supply_depot", "worker": "worker"},
     {"type": "wait_until", "condition": "structure_ready", "target": "supply_depot", "at_least": 1},
     {"type": "build", "building": "barracks", "worker": "worker"},
     {"type": "wait_until", "condition": "structure_ready", "target": "barracks", "at_least": 1},
-    {"type": "train", "unit": "marine"},
-    {"type": "wait_until", "condition": "unit_count", "target": "marine", "at_least": 1},
-    {"type": "attack", "unit": "marine", "x": 55, "y": 45}
+    {"type": "train", "unit": "marine", "count": 2},
+    {"type": "wait_until", "condition": "unit_count", "target": "marine", "at_least": 2},
+    {"type": "attack_enemy", "unit": "marine"}
   ]
 }
 ```
@@ -201,11 +209,11 @@ Implemented now:
 
 - browser `Unit.moveTo(x, y)` movement logic;
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
-- real SC2 `move`, `attack`, `wait`, `wait_until`, `gather minerals`, `train scv/marine`, and `build supply depot/barracks/refinery` strategy-plan parser;
+- real SC2 `move`, `attack`, `attack_enemy`, `wait`, `wait_until`, `gather minerals/gas`, counted `train scv/marine`, and `build supply depot/barracks/refinery` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
 - planner interface with a fixed default `rule` planner, Gemini API planner, observe-before-plan state context, and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
-- real SC2 bot runner that executes sequential movement/wait/condition/build-lifecycle plans through the StarCraft II API;
+- real SC2 bot runner that executes sequential movement/wait/condition/build-lifecycle/resource-gather/production/combat-target plans through the StarCraft II API;
 - `--print-state` game-state summary JSON with army/structure ready/pending counts and `--observe-before-plan` live state-aware planning;
 - `PlanValidator` safety checks before executing generated plans;
 - local detection for common macOS SC2 install paths.

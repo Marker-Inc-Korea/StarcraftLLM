@@ -5,8 +5,10 @@ import unittest
 
 from starcraft_llm.sc2_bot import create_game_state_bot_class, create_move_unit_bot_class, summarize_bot_state
 from starcraft_llm.strategy import (
+    AttackEnemyCommand,
     AttackMoveCommand,
     BuildStructureCommand,
+    GatherGasCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
@@ -176,6 +178,39 @@ class StrategyPlanBotTest(unittest.TestCase):
         self.assertEqual(bot.workers[0].gather_targets, [mineral])
         self.assertEqual(bot.workers[1].gather_targets, [mineral])
         self.assertEqual(len(bot.townhalls[0].trained_units), 1)
+        self.assertTrue(bot.client.left)
+
+    def test_bot_executes_train_count_gather_gas_and_attack_enemy(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                TrainUnitCommand(unit="scv", count=2),
+                GatherGasCommand(unit="worker"),
+                AttackEnemyCommand(unit="marine"),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+        refinery = FakeUnit("REFINERY")
+        marine = FakeUnit("MARINE")
+        enemy = FakeUnit("ZERGLING")
+        bot.structures.append(refinery)
+        bot.units.append(marine)
+        bot.enemy_units.append(enemy)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            await bot.on_step(2)
+            await bot.on_step(3)
+            await bot.on_step(4)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertEqual(len(bot.townhalls[0].trained_units), 2)
+        self.assertEqual(bot.workers[0].gather_targets, [refinery])
+        self.assertEqual(bot.workers[1].gather_targets, [refinery])
+        self.assertEqual(marine.attack_targets, [enemy])
         self.assertTrue(bot.client.left)
 
 

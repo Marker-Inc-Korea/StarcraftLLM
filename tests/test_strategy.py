@@ -2,8 +2,10 @@ import json
 import unittest
 
 from starcraft_llm.strategy import (
+    AttackEnemyCommand,
     AttackMoveCommand,
     BuildStructureCommand,
+    GatherGasCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyParseError,
@@ -65,24 +67,25 @@ class StrategyParserTest(unittest.TestCase):
         self.assertEqual(plan.actions[2], MoveCommand(unit="worker", x=11, y=21))
 
     def test_parse_gather_train_build_and_attack_actions(self):
-        plan = parse_strategy_plan("gather minerals; train scv; wait until minerals 100; train marine; build supply depot; build barracks; attack marine 55 45")
+        plan = parse_strategy_plan("gather minerals; gather gas; train scv; wait until minerals 100; train marine 2; build supply depot; build barracks; attack enemy")
 
         self.assertEqual(
             plan.actions,
             (
                 GatherMineralsCommand(unit="worker"),
+                GatherGasCommand(unit="worker"),
                 TrainUnitCommand(unit="scv"),
                 WaitUntilCommand(condition="minerals", at_least=100),
-                TrainUnitCommand(unit="marine"),
+                TrainUnitCommand(unit="marine", count=2),
                 BuildStructureCommand(building="supply_depot"),
                 BuildStructureCommand(building="barracks"),
-                AttackMoveCommand(unit="marine", x=55, y=45),
+                AttackEnemyCommand(unit="marine"),
             ),
         )
 
     def test_parse_json_strategy_plan(self):
         plan = parse_strategy_plan_json(
-            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"wait_until","condition":"structure_ready","target":"supply_depot","at_least":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"},{"type":"build","building":"supply_depot"},{"type":"attack","unit":"marine","x":55,"y":45}]}'
+            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"wait_until","condition":"structure_ready","target":"supply_depot","at_least":1},{"type":"gather","unit":"worker","resource":"vespene"},{"type":"train","unit":"scv","count":2},{"type":"build","building":"supply_depot"},{"type":"attack_enemy","unit":"marine"}]}'
         )
 
         self.assertEqual(
@@ -92,10 +95,10 @@ class StrategyParserTest(unittest.TestCase):
                     MoveCommand(unit="worker", x=35, y=42),
                     WaitCommand(seconds=1),
                     WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
-                    GatherMineralsCommand(unit="worker"),
-                    TrainUnitCommand(unit="scv"),
+                    GatherGasCommand(unit="worker"),
+                    TrainUnitCommand(unit="scv", count=2),
                     BuildStructureCommand(building="supply_depot"),
-                    AttackMoveCommand(unit="marine", x=55, y=45),
+                    AttackEnemyCommand(unit="marine"),
                 )
             ),
         )
@@ -112,9 +115,10 @@ class StrategyParserTest(unittest.TestCase):
                 WaitCommand(seconds=1),
                 WaitUntilCommand(condition="unit_count", target="marine", at_least=1),
                 GatherMineralsCommand(unit="worker"),
-                TrainUnitCommand(unit="scv"),
+                GatherGasCommand(unit="worker"),
+                TrainUnitCommand(unit="scv", count=2),
                 BuildStructureCommand(building="supply_depot"),
-                AttackMoveCommand(unit="marine", x=55, y=45),
+                AttackEnemyCommand(unit="marine"),
             )
         )
 
@@ -130,9 +134,10 @@ class StrategyParserTest(unittest.TestCase):
                     {"type": "wait", "seconds": 1},
                     {"type": "wait_until", "condition": "unit_count", "at_least": 1, "target": "marine"},
                     {"type": "gather", "unit": "worker", "resource": "minerals"},
-                    {"type": "train", "unit": "scv"},
+                    {"type": "gather", "unit": "worker", "resource": "vespene"},
+                    {"type": "train", "unit": "scv", "count": 2},
                     {"type": "build", "building": "supply_depot", "worker": "worker"},
-                    {"type": "attack", "unit": "marine", "x": 55, "y": 45},
+                    {"type": "attack_enemy", "unit": "marine"},
                 ]
             },
         )
@@ -175,6 +180,10 @@ class StrategyParserTest(unittest.TestCase):
         plan = parse_strategy_plan("attack move marine 55 45")
 
         self.assertEqual(plan.actions, (AttackMoveCommand(unit="marine", x=55, y=45),))
+
+    def test_parse_attack_enemy_command(self):
+        self.assertEqual(parse_strategy_plan("attack marine enemy").actions, (AttackEnemyCommand(unit="marine"),))
+        self.assertEqual(parse_strategy_plan("attack nearest enemy").actions, (AttackEnemyCommand(unit="marine"),))
 
     def test_parse_wait_until_variants(self):
         plan = parse_strategy_plan(

@@ -4,8 +4,10 @@ import math
 
 from starcraft_llm.game_state import GameStateSummary
 from starcraft_llm.strategy import (
+    AttackEnemyCommand,
     AttackMoveCommand,
     BuildStructureCommand,
+    GatherGasCommand,
     GatherMineralsCommand,
     MoveCommand,
     StrategyPlan,
@@ -63,6 +65,8 @@ def validate_strategy_plan(
             _validate_point_action(action.unit, action.x, action.y, index, "move", min_coordinate, max_coordinate)
         elif isinstance(action, AttackMoveCommand):
             _validate_point_action(action.unit, action.x, action.y, index, "attack", min_coordinate, max_coordinate)
+        elif isinstance(action, AttackEnemyCommand):
+            _validate_unit(action.unit, index, "attack enemy")
         elif isinstance(action, WaitCommand):
             _validate_wait(action, index)
         elif isinstance(action, WaitUntilCommand):
@@ -81,6 +85,8 @@ def validate_strategy_plan(
             )
         elif isinstance(action, GatherMineralsCommand):
             _validate_gather(action, index, game_state)
+        elif isinstance(action, GatherGasCommand):
+            _validate_gather_gas(action, index, game_state, structures_ready)
         elif isinstance(action, TrainUnitCommand):
             minerals, supply_left, workers = _validate_train(
                 action, index, game_state, minerals, supply_left, workers, structures_ready, units
@@ -104,8 +110,7 @@ def _validate_point_action(
     min_coordinate: float,
     max_coordinate: float,
 ) -> None:
-    if unit not in {"worker", "marine"}:
-        raise PlanValidationError(f"action {index}: unsupported {action_name} unit: {unit}")
+    _validate_unit(unit, index, action_name)
     if not math.isfinite(x) or not math.isfinite(y):
         raise PlanValidationError(f"action {index}: {action_name} coordinates must be finite")
     if not (min_coordinate <= x <= max_coordinate and min_coordinate <= y <= max_coordinate):
@@ -113,6 +118,11 @@ def _validate_point_action(
             f"action {index}: {action_name} coordinates ({x:g}, {y:g}) are outside "
             f"the safe range {min_coordinate:g}..{max_coordinate:g}"
         )
+
+
+def _validate_unit(unit: str, index: int, action_name: str) -> None:
+    if unit not in {"worker", "marine"}:
+        raise PlanValidationError(f"action {index}: unsupported {action_name} unit: {unit}")
 
 
 def _validate_wait(action: WaitCommand, index: int) -> None:
@@ -218,6 +228,20 @@ def _validate_gather(action: GatherMineralsCommand, index: int, game_state: Game
         raise PlanValidationError(f"action {index}: cannot gather minerals with no workers")
 
 
+def _validate_gather_gas(
+    action: GatherGasCommand,
+    index: int,
+    game_state: GameStateSummary | None,
+    structures_ready: dict[str, int],
+) -> None:
+    if action.unit != "worker":
+        raise PlanValidationError(f"action {index}: only workers can gather gas")
+    if game_state is not None and game_state.workers < 1:
+        raise PlanValidationError(f"action {index}: cannot gather gas with no workers")
+    if game_state is not None and structures_ready.get("refinery", 0) < 1:
+        raise PlanValidationError(f"action {index}: cannot gather gas without a ready refinery")
+
+
 def _validate_train(
     action: TrainUnitCommand,
     index: int,
@@ -230,6 +254,10 @@ def _validate_train(
 ) -> tuple[int | None, int | None, int | None]:
     if action.unit not in _TRAIN_COSTS:
         raise PlanValidationError(f"action {index}: unsupported train unit: {action.unit}")
+    if action.count < 1:
+        raise PlanValidationError(f"action {index}: train count must be at least 1")
+    if action.count > 20:
+        raise PlanValidationError(f"action {index}: train count is too high for the MVP")
 
     if game_state is None:
         return minerals, supply_left, workers
@@ -240,20 +268,23 @@ def _validate_train(
         raise PlanValidationError(f"action {index}: cannot train marine without a barracks")
 
     cost = _TRAIN_COSTS[action.unit]
-    if minerals is not None and minerals < cost:
-        raise PlanValidationError(f"action {index}: cannot train {action.unit} with only {minerals} minerals")
-    if supply_left is not None and supply_left < 1:
-        raise PlanValidationError(f"action {index}: cannot train {action.unit} with no supply left")
+    total_cost = cost * action.count
+    if minerals is not None and minerals < total_cost:
+        raise PlanValidationError(f"action {index}: cannot train {action.count} {action.unit} with only {minerals} minerals")
+    if supply_left is not None and supply_left < action.count:
+        if supply_left < 1:
+            raise PlanValidationError(f"action {index}: cannot train {action.unit} with no supply left")
+        raise PlanValidationError(f"action {index}: cannot train {action.count} {action.unit} with only {supply_left} supply left")
 
     if action.unit == "scv":
-        units["worker"] = units.get("worker", 0) + 1
-        workers = (workers or 0) + 1
+        units["worker"] = units.get("worker", 0) + action.count
+        workers = (workers or 0) + action.count
     else:
-        units[action.unit] = units.get(action.unit, 0) + 1
+        units[action.unit] = units.get(action.unit, 0) + action.count
 
     return (
-        minerals - cost if minerals is not None else None,
-        supply_left - 1 if supply_left is not None else None,
+        minerals - total_cost if minerals is not None else None,
+        supply_left - action.count if supply_left is not None else None,
         workers,
     )
 
