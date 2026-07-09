@@ -12,6 +12,7 @@ from starcraft_llm.strategy import (
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
+    WaitUntilCommand,
 )
 
 
@@ -36,9 +37,11 @@ class FakeTypeId:
 
 
 class FakeUnit:
-    def __init__(self, type_name="SCV"):
+    def __init__(self, type_name="SCV", is_ready=True):
         self.type_id = FakeTypeId(type_name)
         self.position = (35, 42)
+        self.is_ready = is_ready
+        self.build_progress = 1.0 if is_ready else 0.25
         self.targets = []
         self.attack_targets = []
         self.gather_targets = []
@@ -64,7 +67,7 @@ class FakeUnit:
 class FakeUnits(list):
     @property
     def ready(self):
-        return self
+        return FakeUnits([unit for unit in self if getattr(unit, "is_ready", True)])
 
     @property
     def idle(self):
@@ -104,7 +107,7 @@ class FakeBotAI:
 
     async def build(self, unit_type, near, max_distance=20):
         self.build_orders.append((unit_type, near, max_distance))
-        self.structures.append(FakeUnit(getattr(unit_type, "name", unit_type)))
+        self.structures.append(FakeUnit(getattr(unit_type, "name", unit_type), is_ready=False))
         return True
 
     def select_build_worker(self, _target):
@@ -129,6 +132,8 @@ class GameStateBotTest(unittest.TestCase):
         self.assertEqual(summary.townhalls, 1)
         self.assertEqual(summary.army, {"marine": 1})
         self.assertEqual(summary.structures, {"commandcenter": 1})
+        self.assertEqual(summary.structures_ready, {"commandcenter": 1})
+        self.assertEqual(summary.structures_pending, {})
         self.assertEqual(summary.known_enemy_units, 1)
         self.assertEqual(summary.game_time_seconds, 7.25)
 
@@ -214,12 +219,64 @@ class StrategyPlanBotTest(unittest.TestCase):
         async def run_plan():
             await bot.on_start()
             await bot.on_step(1)
+            bot.structures.append(FakeUnit("REFINERY", is_ready=False))
             await bot.on_step(2)
 
         with contextlib.redirect_stdout(io.StringIO()):
             asyncio.run(run_plan())
 
         self.assertEqual(bot.workers[0].build_orders, [("REFINERY", bot.vespene_geyser[0])])
+        self.assertTrue(bot.client.left)
+
+    def test_bot_waits_until_condition_is_met(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                WaitUntilCommand(condition="minerals", at_least=60),
+                GatherMineralsCommand(unit="worker"),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            self.assertEqual(bot.workers[0].gather_targets, [])
+            bot.minerals = 60
+            await bot.on_step(2)
+            await bot.on_step(3)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertEqual(bot.workers[0].gather_targets, [bot.mineral_field[0]])
+        self.assertTrue(bot.client.left)
+
+    def test_bot_waits_until_structure_is_ready(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
+                TrainUnitCommand(unit="scv"),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+        depot = FakeUnit("SUPPLYDEPOT", is_ready=False)
+        bot.structures.append(depot)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            self.assertEqual(bot.townhalls[0].trained_units, [])
+            depot.is_ready = True
+            depot.build_progress = 1.0
+            await bot.on_step(2)
+            await bot.on_step(3)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertEqual(len(bot.townhalls[0].trained_units), 1)
         self.assertTrue(bot.client.left)
 
     def test_bot_observes_state_before_planning(self):

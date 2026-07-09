@@ -10,6 +10,7 @@ from starcraft_llm.strategy import (
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
+    WaitUntilCommand,
     parse_strategy,
     parse_strategy_plan,
     parse_strategy_plan_json,
@@ -64,13 +65,14 @@ class StrategyParserTest(unittest.TestCase):
         self.assertEqual(plan.actions[2], MoveCommand(unit="worker", x=11, y=21))
 
     def test_parse_gather_train_build_and_attack_actions(self):
-        plan = parse_strategy_plan("gather minerals; train scv; train marine; build supply depot; build barracks; attack marine 55 45")
+        plan = parse_strategy_plan("gather minerals; train scv; wait until minerals 100; train marine; build supply depot; build barracks; attack marine 55 45")
 
         self.assertEqual(
             plan.actions,
             (
                 GatherMineralsCommand(unit="worker"),
                 TrainUnitCommand(unit="scv"),
+                WaitUntilCommand(condition="minerals", at_least=100),
                 TrainUnitCommand(unit="marine"),
                 BuildStructureCommand(building="supply_depot"),
                 BuildStructureCommand(building="barracks"),
@@ -80,7 +82,7 @@ class StrategyParserTest(unittest.TestCase):
 
     def test_parse_json_strategy_plan(self):
         plan = parse_strategy_plan_json(
-            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"},{"type":"build","building":"supply_depot"},{"type":"attack","unit":"marine","x":55,"y":45}]}'
+            '{"actions":[{"type":"move","unit":"worker","x":35,"y":42},{"type":"wait","seconds":1},{"type":"wait_until","condition":"structure_ready","target":"supply_depot","at_least":1},{"type":"gather","unit":"worker","resource":"minerals"},{"type":"train","unit":"scv"},{"type":"build","building":"supply_depot"},{"type":"attack","unit":"marine","x":55,"y":45}]}'
         )
 
         self.assertEqual(
@@ -89,6 +91,7 @@ class StrategyParserTest(unittest.TestCase):
                 actions=(
                     MoveCommand(unit="worker", x=35, y=42),
                     WaitCommand(seconds=1),
+                    WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
                     GatherMineralsCommand(unit="worker"),
                     TrainUnitCommand(unit="scv"),
                     BuildStructureCommand(building="supply_depot"),
@@ -107,6 +110,7 @@ class StrategyParserTest(unittest.TestCase):
             actions=(
                 MoveCommand(unit="worker", x=35, y=42),
                 WaitCommand(seconds=1),
+                WaitUntilCommand(condition="unit_count", target="marine", at_least=1),
                 GatherMineralsCommand(unit="worker"),
                 TrainUnitCommand(unit="scv"),
                 BuildStructureCommand(building="supply_depot"),
@@ -124,6 +128,7 @@ class StrategyParserTest(unittest.TestCase):
                 "actions": [
                     {"type": "move", "unit": "worker", "x": 35, "y": 42},
                     {"type": "wait", "seconds": 1},
+                    {"type": "wait_until", "condition": "unit_count", "at_least": 1, "target": "marine"},
                     {"type": "gather", "unit": "worker", "resource": "minerals"},
                     {"type": "train", "unit": "scv"},
                     {"type": "build", "building": "supply_depot", "worker": "worker"},
@@ -170,6 +175,22 @@ class StrategyParserTest(unittest.TestCase):
         plan = parse_strategy_plan("attack move marine 55 45")
 
         self.assertEqual(plan.actions, (AttackMoveCommand(unit="marine", x=55, y=45),))
+
+    def test_parse_wait_until_variants(self):
+        plan = parse_strategy_plan(
+            "wait until minerals 100; wait until supply left 1; "
+            "wait until structure supply depot ready; wait until unit marine 2"
+        )
+
+        self.assertEqual(
+            plan.actions,
+            (
+                WaitUntilCommand(condition="minerals", at_least=100),
+                WaitUntilCommand(condition="supply_left", at_least=1),
+                WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
+                WaitUntilCommand(condition="unit_count", target="marine", at_least=2),
+            ),
+        )
 
     def test_rejects_unsupported_command(self):
         with self.assertRaises(StrategyParseError):

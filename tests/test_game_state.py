@@ -19,6 +19,8 @@ class GameStateSummaryTest(unittest.TestCase):
             townhalls=1,
             army={"marine": 2},
             structures={"barracks": 1, "commandcenter": 1},
+            structures_ready={"commandcenter": 1},
+            structures_pending={"barracks": 1},
             known_enemy_units=0,
             game_time_seconds=3.5,
         )
@@ -33,6 +35,8 @@ class GameStateSummaryTest(unittest.TestCase):
                 "townhalls": 1,
                 "army": {"marine": 2},
                 "structures": {"barracks": 1, "commandcenter": 1},
+                "structures_ready": {"commandcenter": 1},
+                "structures_pending": {"barracks": 1},
                 "known_enemy_units": 0,
                 "game_time_seconds": 3.5,
             },

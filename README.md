@@ -24,8 +24,8 @@ python scripts/run_sc2_movement.py --planner gemini --strategy "초반에 일꾼
 python scripts/run_sc2_movement.py --planner gemini --observe-before-plan --strategy "초반에 일꾼을 뽑고 미네랄을 캐" --fast --stop-after 1
 python scripts/run_sc2_movement.py --strategy "move worker 35 42; wait 1; move worker 45 42"
 python scripts/run_sc2_movement.py --strategy "gather minerals; train scv"
-python scripts/run_sc2_movement.py --strategy "gather minerals; wait 10; build supply depot" --fast --stop-after 1
-python scripts/run_sc2_movement.py --strategy "build barracks; train marine; attack marine 55 45" --print-plan
+python scripts/run_sc2_movement.py --strategy "gather minerals; wait until minerals 100; build supply depot" --fast --stop-after 1
+python scripts/run_sc2_movement.py --strategy "build supply depot; wait until structure supply depot ready; build barracks; wait until structure barracks ready; train marine; wait until unit marine 1; attack marine 55 45" --print-plan
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해" --print-plan
 python scripts/run_sc2_movement.py --print-state --fast
 python scripts/run_sc2_movement.py --strategy "일꾼으로 정찰해"
@@ -47,6 +47,12 @@ move worker 35 42
 move marine 35 42
 move 35 42
 wait 1
+wait until minerals 100
+wait until vespene 25
+wait until supply left 1
+wait until structure supply depot ready
+wait until structure barracks pending
+wait until unit marine 1
 gather minerals
 gather worker minerals
 train scv
@@ -63,15 +69,19 @@ Multiple actions can be separated by semicolons, newlines, or `then`:
 ```text
 move worker 35 42; wait 1; move worker 45 42
 move worker 35 42 then wait 1 then move worker 45 42
+gather minerals; wait until minerals 100; build supply depot
+build supply depot; wait until structure supply depot ready; build barracks
 ```
 
 This deterministic plan format is the next integration seam for an LLM: the planner translates a higher-level strategy into these primitive actions, and the SC2 executor can run the result without interpreting free-form text during gameplay.
+
+`build ...` now waits until construction has started before advancing. If a later action needs a completed building, add an explicit condition such as `wait until structure supply depot ready` or the JSON equivalent below.
 
 Planner mode is explicit. The default is fixed to `--planner rule`, which uses the local deterministic parser/intent translator. Other modes do not run as fallbacks; they must be selected explicitly. `--planner gemini` calls the Gemini API and must succeed on its own. `--planner openai` and `--planner server` are reserved interface modes and currently fail with a clear “not implemented yet” message until those integrations are added.
 
 Use `--observe-before-plan` to start SC2 first, capture the initial `GameStateSummary`, pass that state to the selected planner, validate the returned plan, and only then execute it. Without this option, the planner runs before SC2 starts and receives no live game-state context.
 
-Every executable plan passes through `PlanValidator` before the bot runs it. The validator keeps the MVP safe by checking action count, move coordinate sanity, wait limits, worker availability for gathering, and simple SCV-training feasibility such as minerals, supply, and townhall availability when game state is known.
+Every executable plan passes through `PlanValidator` before the bot runs it. The validator keeps the MVP safe by checking action count, move coordinate sanity, wait limits, condition-wait targets, worker availability for gathering, and simple resource/prerequisite feasibility such as minerals, supply, ready structures, and townhall availability when game state is known.
 
 The same plan can be provided as JSON, which is the intended future LLM output contract:
 
@@ -80,11 +90,16 @@ The same plan can be provided as JSON, which is the intended future LLM output c
   "actions": [
     {"type": "move", "unit": "worker", "x": 35, "y": 42},
     {"type": "wait", "seconds": 1},
+    {"type": "wait_until", "condition": "minerals", "at_least": 100},
     {"type": "move", "unit": "worker", "x": 45, "y": 42},
     {"type": "gather", "unit": "worker", "resource": "minerals"},
     {"type": "train", "unit": "scv"},
     {"type": "build", "building": "supply_depot", "worker": "worker"},
+    {"type": "wait_until", "condition": "structure_ready", "target": "supply_depot", "at_least": 1},
+    {"type": "build", "building": "barracks", "worker": "worker"},
+    {"type": "wait_until", "condition": "structure_ready", "target": "barracks", "at_least": 1},
     {"type": "train", "unit": "marine"},
+    {"type": "wait_until", "condition": "unit_count", "target": "marine", "at_least": 1},
     {"type": "attack", "unit": "marine", "x": 55, "y": 45}
   ]
 }
@@ -135,6 +150,8 @@ Example state summary:
   "townhalls": 1,
   "army": {},
   "structures": {"commandcenter": 1},
+  "structures_ready": {"commandcenter": 1},
+  "structures_pending": {},
   "known_enemy_units": 0,
   "game_time_seconds": 0.0
 }
@@ -184,12 +201,12 @@ Implemented now:
 
 - browser `Unit.moveTo(x, y)` movement logic;
 - browser `GameWorld.moveUnit(unitId, x, y)` command surface;
-- real SC2 `move`, `attack`, `wait`, `gather minerals`, `train scv/marine`, and `build supply depot/barracks/refinery` strategy-plan parser;
+- real SC2 `move`, `attack`, `wait`, `wait_until`, `gather minerals`, `train scv/marine`, and `build supply depot/barracks/refinery` strategy-plan parser;
 - canonical JSON StrategyPlan parser/serializer for future LLM output;
 - planner interface with a fixed default `rule` planner, Gemini API planner, observe-before-plan state context, and explicit future `openai`/`server` modes;
 - tiny rule-based intent translator for examples like `일꾼으로 정찰해`;
-- real SC2 bot runner that executes sequential movement/wait plans through the StarCraft II API;
-- `--print-state` game-state summary JSON with army/structure counts and `--observe-before-plan` live state-aware planning;
+- real SC2 bot runner that executes sequential movement/wait/condition/build-lifecycle plans through the StarCraft II API;
+- `--print-state` game-state summary JSON with army/structure ready/pending counts and `--observe-before-plan` live state-aware planning;
 - `PlanValidator` safety checks before executing generated plans;
 - local detection for common macOS SC2 install paths.
 

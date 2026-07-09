@@ -32,6 +32,15 @@ class WaitCommand:
 
 
 @dataclass(frozen=True)
+class WaitUntilCommand:
+    """Pause execution until the observed game state satisfies a condition."""
+
+    condition: str
+    at_least: float
+    target: str | None = None
+
+
+@dataclass(frozen=True)
 class GatherMineralsCommand:
     """Send a logical worker group to nearby mineral fields."""
 
@@ -54,7 +63,13 @@ class BuildStructureCommand:
 
 
 StrategyAction: TypeAlias = (
-    MoveCommand | AttackMoveCommand | WaitCommand | GatherMineralsCommand | TrainUnitCommand | BuildStructureCommand
+    MoveCommand
+    | AttackMoveCommand
+    | WaitCommand
+    | WaitUntilCommand
+    | GatherMineralsCommand
+    | TrainUnitCommand
+    | BuildStructureCommand
 )
 
 
@@ -127,6 +142,9 @@ def parse_strategy_plan(text: str, default_unit: str = "worker") -> StrategyPlan
     - move worker 35 42
     - attack marine 55 45
     - wait 2
+    - wait until minerals 100
+    - wait until structure supply depot ready
+    - wait until unit marine 1
     - gather minerals
     - train scv
     - train marine
@@ -178,6 +196,8 @@ def parse_strategy_plan_json(text: str, default_unit: str = "worker") -> Strateg
         {"type": "move", "unit": "worker", "x": 35, "y": 42},
         {"type": "attack", "unit": "marine", "x": 55, "y": 45},
         {"type": "wait", "seconds": 1},
+        {"type": "wait_until", "condition": "minerals", "at_least": 100},
+        {"type": "wait_until", "condition": "structure_ready", "target": "supply_depot", "at_least": 1},
         {"type": "gather", "unit": "worker", "resource": "minerals"},
         {"type": "train", "unit": "scv"},
         {"type": "build", "building": "supply_depot"}
@@ -293,9 +313,12 @@ def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand:
     return AttackMoveCommand(unit=unit, x=x, y=y)
 
 
-def _parse_wait(parts: list[str]) -> WaitCommand:
+def _parse_wait(parts: list[str]) -> WaitCommand | WaitUntilCommand:
+    if len(parts) >= 2 and parts[1].lower() == "until":
+        return _parse_wait_until(parts[2:])
+
     if len(parts) != 2:
-        raise StrategyParseError("use: wait 2")
+        raise StrategyParseError("use: wait 2 or wait until minerals 100")
 
     try:
         seconds = float(parts[1])
@@ -306,6 +329,72 @@ def _parse_wait(parts: list[str]) -> WaitCommand:
         raise StrategyParseError("wait duration must not be negative")
 
     return WaitCommand(seconds=seconds)
+
+
+def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
+    if not parts:
+        raise StrategyParseError(
+            "use: wait until minerals 100, wait until structure supply depot ready, or wait until unit marine 1"
+        )
+
+    metric = parts[0].lower().replace("-", "_")
+    if metric in {"mineral", "minerals", "vespene", "gas"}:
+        if len(parts) != 2:
+            raise StrategyParseError(f"use: wait until {metric} 100")
+        condition = "vespene" if metric in {"vespene", "gas"} else "minerals"
+        return WaitUntilCommand(condition=condition, at_least=_parse_at_least(parts[1]))
+
+    if metric in {"supply_left", "supply"}:
+        if metric == "supply" and len(parts) >= 2 and parts[1].lower() == "left":
+            value_parts = parts[2:]
+        else:
+            value_parts = parts[1:]
+        if len(value_parts) != 1:
+            raise StrategyParseError("use: wait until supply left 1 or wait until supply_left 1")
+        return WaitUntilCommand(condition="supply_left", at_least=_parse_at_least(value_parts[0]))
+
+    if metric in {"structure", "building"}:
+        return _parse_wait_until_structure(parts[1:])
+
+    if metric in {"unit", "units"}:
+        if len(parts) != 3:
+            raise StrategyParseError("use: wait until unit marine 1")
+        return WaitUntilCommand(
+            condition="unit_count",
+            target=normalize_wait_unit(parts[1]),
+            at_least=_parse_at_least(parts[2]),
+        )
+
+    raise StrategyParseError(f"unsupported wait-until condition: {parts[0]}")
+
+
+def _parse_wait_until_structure(parts: list[str]) -> WaitUntilCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: wait until structure supply depot ready")
+
+    status_words = {"ready", "complete", "completed", "pending", "started", "count", "total"}
+    status_index = next((index for index, part in enumerate(parts) if part.lower() in status_words), None)
+    if status_index is None:
+        raise StrategyParseError("structure wait must end with ready, pending, started, count, or total")
+
+    building_text = " ".join(parts[:status_index])
+    if not building_text:
+        raise StrategyParseError("structure wait is missing the structure name")
+
+    status = parts[status_index].lower()
+    remaining = parts[status_index + 1 :]
+    if len(remaining) > 1:
+        raise StrategyParseError("structure wait count must be a single number")
+    at_least = _parse_at_least(remaining[0]) if remaining else 1
+
+    if status in {"ready", "complete", "completed"}:
+        condition = "structure_ready"
+    elif status in {"pending", "started"}:
+        condition = "structure_pending"
+    else:
+        condition = "structure_count"
+
+    return WaitUntilCommand(condition=condition, target=normalize_building(building_text), at_least=at_least)
 
 
 def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand:
@@ -363,6 +452,9 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             raise StrategyParseError("wait duration must not be negative")
         return WaitCommand(seconds=seconds)
 
+    if action_type in {"wait_until", "wait-until"}:
+        return _wait_until_from_dict(payload)
+
     if action_type in {"gather", "gather_minerals"}:
         resource = str(payload.get("resource", "minerals")).strip().lower()
         if resource not in {"mineral", "minerals", "미네랄"}:
@@ -391,6 +483,15 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         return {"type": "attack", "unit": action.unit, "x": action.x, "y": action.y}
     if isinstance(action, WaitCommand):
         return {"type": "wait", "seconds": action.seconds}
+    if isinstance(action, WaitUntilCommand):
+        payload: dict[str, object] = {
+            "type": "wait_until",
+            "condition": action.condition,
+            "at_least": action.at_least,
+        }
+        if action.target is not None:
+            payload["target"] = action.target
+        return payload
     if isinstance(action, GatherMineralsCommand):
         return {"type": "gather", "unit": action.unit, "resource": "minerals"}
     if isinstance(action, TrainUnitCommand):
@@ -417,6 +518,42 @@ def _required_number(payload: dict[str, Any], key: str) -> float:
         return float(value)
     except (TypeError, ValueError) as exc:
         raise StrategyParseError(f"strategy JSON field must be numeric: {key}") from exc
+
+
+def _optional_number(payload: dict[str, Any], keys: tuple[str, ...], default: float | None = None) -> float:
+    for key in keys:
+        if key in payload:
+            return _required_number(payload, key)
+    if default is not None:
+        return default
+    raise StrategyParseError(f"strategy JSON action is missing one of required fields: {', '.join(keys)}")
+
+
+def _parse_at_least(value: str) -> float:
+    try:
+        at_least = float(value)
+    except ValueError as exc:
+        raise StrategyParseError("wait-until threshold must be numeric") from exc
+    if at_least < 0:
+        raise StrategyParseError("wait-until threshold must not be negative")
+    return at_least
+
+
+def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
+    condition = normalize_wait_condition(str(payload.get("condition", "")))
+    at_least = _optional_number(payload, ("at_least", "count", "value", "minimum"), default=1)
+    if at_least < 0:
+        raise StrategyParseError("wait-until threshold must not be negative")
+
+    target: str | None = None
+    if condition.startswith("structure_"):
+        target_value = payload.get("target", payload.get("structure", payload.get("building", "")))
+        target = normalize_building(str(target_value))
+    elif condition == "unit_count":
+        target_value = payload.get("target", payload.get("unit", ""))
+        target = normalize_wait_unit(str(target_value))
+
+    return WaitUntilCommand(condition=condition, target=target, at_least=at_least)
 
 
 def _looks_like_json(text: str) -> bool:
@@ -459,6 +596,54 @@ def normalize_train_unit(unit: str) -> str:
     }
     if normalized not in aliases:
         raise StrategyParseError(f"unsupported train unit for MVP: {unit}")
+    return aliases[normalized]
+
+
+def normalize_wait_unit(unit: str) -> str:
+    normalized = unit.strip().lower()
+    aliases = {
+        "scv": "worker",
+        "worker": "worker",
+        "workers": "worker",
+        "일꾼": "worker",
+        "건설로봇": "worker",
+        "marine": "marine",
+        "marines": "marine",
+        "마린": "marine",
+        "해병": "marine",
+    }
+    if normalized not in aliases:
+        raise StrategyParseError(f"unsupported wait-until unit for MVP: {unit}")
+    return aliases[normalized]
+
+
+def normalize_wait_condition(condition: str) -> str:
+    normalized = condition.strip().lower().replace("-", "_")
+    aliases = {
+        "mineral": "minerals",
+        "minerals": "minerals",
+        "vespene": "vespene",
+        "gas": "vespene",
+        "supply_left": "supply_left",
+        "supply": "supply_left",
+        "structure": "structure_count",
+        "building": "structure_count",
+        "structure_count": "structure_count",
+        "building_count": "structure_count",
+        "structure_total": "structure_count",
+        "structure_ready": "structure_ready",
+        "building_ready": "structure_ready",
+        "structure_complete": "structure_ready",
+        "structure_completed": "structure_ready",
+        "structure_pending": "structure_pending",
+        "building_pending": "structure_pending",
+        "structure_started": "structure_pending",
+        "unit": "unit_count",
+        "units": "unit_count",
+        "unit_count": "unit_count",
+    }
+    if normalized not in aliases:
+        raise StrategyParseError(f"unsupported wait-until condition: {condition}")
     return aliases[normalized]
 
 

@@ -9,6 +9,7 @@ from starcraft_llm.strategy import (
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
+    WaitUntilCommand,
 )
 from starcraft_llm.validator import PlanValidationError, validate_strategy_plan
 
@@ -28,12 +29,44 @@ class PlanValidatorTest(unittest.TestCase):
         plan = StrategyPlan(
             actions=(
                 BuildStructureCommand(building="barracks"),
+                WaitUntilCommand(condition="structure_ready", target="barracks", at_least=1),
                 TrainUnitCommand(unit="marine"),
                 AttackMoveCommand(unit="marine", x=55, y=45),
             )
         )
 
         self.assertIs(validate_strategy_plan(plan, _state(minerals=250, structures={"supplydepot": 1})), plan)
+
+    def test_accepts_supply_depot_wait_ready_then_barracks_plan(self):
+        plan = StrategyPlan(
+            actions=(
+                BuildStructureCommand(building="supply_depot"),
+                WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
+                BuildStructureCommand(building="barracks"),
+            )
+        )
+
+        self.assertIs(validate_strategy_plan(plan, _state(minerals=300)), plan)
+
+    def test_wait_until_minerals_allows_later_build(self):
+        plan = StrategyPlan(
+            actions=(
+                WaitUntilCommand(condition="minerals", at_least=100),
+                BuildStructureCommand(building="supply_depot"),
+            )
+        )
+
+        self.assertIs(validate_strategy_plan(plan, _state(minerals=50)), plan)
+
+    def test_wait_until_worker_count_can_follow_train_scv(self):
+        plan = StrategyPlan(
+            actions=(
+                TrainUnitCommand(unit="scv"),
+                WaitUntilCommand(condition="unit_count", target="worker", at_least=9),
+            )
+        )
+
+        self.assertIs(validate_strategy_plan(plan, _state(minerals=50, workers=8)), plan)
 
     def test_rejects_train_scv_without_enough_minerals(self):
         plan = StrategyPlan(actions=(TrainUnitCommand(unit="scv"),))
@@ -58,6 +91,17 @@ class PlanValidatorTest(unittest.TestCase):
 
         with self.assertRaisesRegex(PlanValidationError, "before a supply depot"):
             validate_strategy_plan(plan, _state(minerals=150))
+
+    def test_rejects_build_barracks_after_depot_started_but_not_ready(self):
+        plan = StrategyPlan(
+            actions=(
+                BuildStructureCommand(building="supply_depot"),
+                BuildStructureCommand(building="barracks"),
+            )
+        )
+
+        with self.assertRaisesRegex(PlanValidationError, "before a supply depot"):
+            validate_strategy_plan(plan, _state(minerals=300))
 
     def test_rejects_build_without_enough_minerals(self):
         plan = StrategyPlan(actions=(BuildStructureCommand(building="supply_depot"),))
@@ -98,6 +142,18 @@ class PlanValidatorTest(unittest.TestCase):
         plan = StrategyPlan(actions=(WaitCommand(seconds=60),))
 
         with self.assertRaisesRegex(PlanValidationError, "too long"):
+            validate_strategy_plan(plan)
+
+    def test_rejects_impossible_wait_until_unit_count(self):
+        plan = StrategyPlan(actions=(WaitUntilCommand(condition="unit_count", target="marine", at_least=1),))
+
+        with self.assertRaisesRegex(PlanValidationError, "cannot wait"):
+            validate_strategy_plan(plan, _state())
+
+    def test_rejects_unknown_wait_until_condition(self):
+        plan = StrategyPlan(actions=(WaitUntilCommand(condition="enemy_base_seen", at_least=1),))
+
+        with self.assertRaisesRegex(PlanValidationError, "unsupported wait-until"):
             validate_strategy_plan(plan)
 
     def test_rejects_too_many_actions(self):

@@ -31,6 +31,7 @@ from starcraft_llm.strategy import (
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
+    WaitUntilCommand,
     strategy_plan_to_json,
 )
 from starcraft_llm.validator import PlanValidationError, validate_strategy_plan
@@ -118,9 +119,15 @@ def summarize_bot_state(bot) -> GameStateSummary:
         army[name] = army.get(name, 0) + 1
 
     structures: dict[str, int] = {}
+    structures_ready: dict[str, int] = {}
+    structures_pending: dict[str, int] = {}
     for structure in getattr(bot, "structures", bot.townhalls):
         name = _unit_type_name(structure)
         structures[name] = structures.get(name, 0) + 1
+        if _structure_is_ready(structure):
+            structures_ready[name] = structures_ready.get(name, 0) + 1
+        else:
+            structures_pending[name] = structures_pending.get(name, 0) + 1
 
     return GameStateSummary(
         minerals=int(bot.minerals),
@@ -136,6 +143,8 @@ def summarize_bot_state(bot) -> GameStateSummary:
         known_enemy_units=len(bot.enemy_units),
         game_time_seconds=float(getattr(bot, "time", 0.0)),
         structures=structures,
+        structures_ready=structures_ready,
+        structures_pending=structures_pending,
     )
 
 
@@ -143,6 +152,16 @@ def _unit_type_name(unit) -> str:
     raw_type = getattr(unit, "type_id", "unknown")
     name = getattr(raw_type, "name", str(raw_type))
     return name.lower()
+
+
+def _structure_is_ready(structure) -> bool:
+    is_ready = getattr(structure, "is_ready", None)
+    if is_ready is not None:
+        return bool(is_ready)
+    build_progress = getattr(structure, "build_progress", None)
+    if build_progress is not None:
+        return float(build_progress) >= 1.0
+    return True
 
 
 def create_move_unit_bot_class(bot_ai_base, point2_class):
@@ -164,6 +183,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             self.observed_summary: GameStateSummary | None = None
             self._current_action_index = 0
             self._action_started_at_loop_time: float | None = None
+            self._action_context: dict[str, object] = {}
             self._plan_finished_at_loop_time: float | None = None
             self._left_game = False
 
@@ -241,6 +261,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, WaitCommand):
                 self._execute_wait(action)
                 return
+            if isinstance(action, WaitUntilCommand):
+                self._execute_wait_until(action, iteration)
+                return
             if isinstance(action, GatherMineralsCommand):
                 self._execute_gather_minerals(action, iteration)
                 return
@@ -294,6 +317,25 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if elapsed >= command.seconds:
                 self._advance_action()
 
+        def _execute_wait_until(self, command: WaitUntilCommand, iteration: int) -> None:
+            current = self._wait_until_observed_value(command)
+            if current >= command.at_least:
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"condition met: {self._describe_action(command)} (current={current:g})"
+                )
+                self._advance_action()
+                return
+
+            if self._action_started_at_loop_time is None:
+                self._action_started_at_loop_time = asyncio.get_running_loop().time()
+                print(
+                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"waiting until {self._describe_action(command)} (current={current:g})"
+                )
+            elif iteration % 22 == 0:
+                print(f"Still waiting for {self._describe_action(command)} (current={current:g})")
+
         def _execute_gather_minerals(self, command: GatherMineralsCommand, iteration: int) -> None:
             workers = self._select_units(command.unit)
             mineral_fields = self.mineral_field
@@ -340,6 +382,24 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 raise TypeError(f"unsupported build structure: {command.building}")
 
             unit_type = self._building_unit_type(command.building)
+            if not self._action_context:
+                self._action_context = {
+                    "building": command.building,
+                    "total_before": self._structure_count(command.building, readiness="total"),
+                    "issued": False,
+                }
+
+            if self._action_context.get("issued"):
+                if self._build_started_since_action_start(command.building):
+                    print(
+                        f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                        f"build {command.building} started"
+                    )
+                    self._advance_action()
+                elif iteration % 22 == 0:
+                    print(f"Waiting for {command.building} construction to start...")
+                return
+
             if hasattr(self, "can_afford") and not self.can_afford(unit_type):
                 if iteration % 22 == 0:
                     print(f"Waiting for enough resources to build {command.building}...")
@@ -352,13 +412,23 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 issued = await self.build(unit_type, near=near, max_distance=20)
 
             if issued:
+                self._action_context["issued"] = True
                 print(
                     f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
                     f"issued build {command.building} command"
                 )
-                self._advance_action()
+                if self._build_started_since_action_start(command.building):
+                    print(
+                        f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                        f"build {command.building} started"
+                    )
+                    self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for placement/worker to build {command.building}...")
+
+        def _build_started_since_action_start(self, building: str) -> bool:
+            total_before = int(self._action_context.get("total_before", 0))
+            return self._structure_count(building, readiness="total") > total_before
 
         @staticmethod
         def _closest_mineral_field(mineral_fields, worker):
@@ -391,6 +461,37 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return structures.of_type({unit_type})
             return type(structures)([unit for unit in structures if getattr(unit, "type_id", None) == unit_type])
 
+        def _structure_count(self, building: str, readiness: str = "total") -> int:
+            structures = self._structures_of_type(self._building_unit_type(building))
+            if readiness == "total":
+                return len(structures)
+            if readiness == "ready":
+                return sum(1 for structure in structures if _structure_is_ready(structure))
+            if readiness == "pending":
+                return sum(1 for structure in structures if not _structure_is_ready(structure))
+            raise ValueError(f"unsupported structure readiness filter: {readiness}")
+
+        def _wait_until_observed_value(self, command: WaitUntilCommand) -> float:
+            if command.condition == "minerals":
+                return float(self.minerals)
+            if command.condition == "vespene":
+                return float(self.vespene)
+            if command.condition == "supply_left":
+                return float(self.supply_left)
+            if command.condition == "unit_count":
+                if command.target == "worker":
+                    return float(len(self.workers))
+                if command.target == "marine":
+                    return float(len(self.units.of_type({self._unit_type_id().MARINE})))
+                return 0.0
+            if command.condition == "structure_count":
+                return float(self._structure_count(command.target or "", readiness="total"))
+            if command.condition == "structure_ready":
+                return float(self._structure_count(command.target or "", readiness="ready"))
+            if command.condition == "structure_pending":
+                return float(self._structure_count(command.target or "", readiness="pending"))
+            raise TypeError(f"unsupported wait-until condition: {command.condition}")
+
         def _execute_refinery_build(self, unit_type) -> bool:
             geysers = getattr(self, "vespene_geyser", [])
             if not geysers:
@@ -418,6 +519,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _advance_action(self) -> None:
             self._current_action_index += 1
             self._action_started_at_loop_time = None
+            self._action_context = {}
             if self.plan is None:
                 raise RuntimeError("strategy plan is not loaded")
             if self._current_action_index >= len(self.plan.actions):
@@ -483,6 +585,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"attack with {action.unit} toward ({action.x:g}, {action.y:g})"
             if isinstance(action, WaitCommand):
                 return f"wait {action.seconds:g} second(s)"
+            if isinstance(action, WaitUntilCommand):
+                target = f" {action.target}" if action.target else ""
+                return f"{action.condition}{target} >= {action.at_least:g}"
             if isinstance(action, GatherMineralsCommand):
                 return f"gather minerals with {action.unit}"
             if isinstance(action, TrainUnitCommand):

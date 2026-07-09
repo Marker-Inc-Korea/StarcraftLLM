@@ -25,6 +25,8 @@ class GameStateSummary:
     known_enemy_units: int
     game_time_seconds: float
     structures: dict[str, int] = field(default_factory=dict)
+    structures_ready: dict[str, int] = field(default_factory=dict)
+    structures_pending: dict[str, int] = field(default_factory=dict)
 
 
 def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
@@ -40,6 +42,8 @@ def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
         "townhalls": summary.townhalls,
         "army": dict(sorted(summary.army.items())),
         "structures": dict(sorted(summary.structures.items())),
+        "structures_ready": dict(sorted(summary.structures_ready.items())),
+        "structures_pending": dict(sorted(summary.structures_pending.items())),
         "known_enemy_units": summary.known_enemy_units,
         "game_time_seconds": summary.game_time_seconds,
     }
