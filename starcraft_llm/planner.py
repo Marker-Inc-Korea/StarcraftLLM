@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
+from starcraft_llm.command_catalog import build_command_prompt_section
 from starcraft_llm.game_state import GameStateSummary, game_state_summary_to_dict
 from starcraft_llm.strategy import StrategyPlan, parse_strategy_request, strategy_plan_from_dict
 
@@ -71,14 +72,16 @@ class GeminiPlanner:
         model: str | None = None,
         api_key_file: Path | str | None = None,
         timeout_seconds: float = 30,
-        http_post: HttpPost = None,
+        http_post: HttpPost | None = None,
     ):
         self.api_key = api_key
         self.model = model or os.environ.get("STARCRAFT_LLM_GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
-        self.api_key_file = Path(
+        api_key_path = (
             api_key_file
-            or os.environ.get("STARCRAFT_LLM_GEMINI_API_KEY_FILE", str(DEFAULT_GEMINI_API_KEY_FILE))
+            if api_key_file is not None
+            else os.environ.get("STARCRAFT_LLM_GEMINI_API_KEY_FILE", str(DEFAULT_GEMINI_API_KEY_FILE))
         )
+        self.api_key_file = Path(api_key_path)
         self.timeout_seconds = timeout_seconds
         self._http_post = http_post or _post_json
 
@@ -197,7 +200,29 @@ def strategy_plan_json_schema() -> dict[str, Any]:
                 "items": {
                     "type": "object",
                     "properties": {
-                        "type": {"type": "string"},
+                        "type": {
+                            "type": "string",
+                            "enum": [
+                                "move",
+                                "attack",
+                                "attack_enemy",
+                                "patrol",
+                                "hold",
+                                "stop",
+                                "rally",
+                                "wait",
+                                "wait_until",
+                                "gather",
+                                "distribute_workers",
+                                "train",
+                                "build",
+                                "expand",
+                                "build_addon",
+                                "morph",
+                                "research",
+                                "repair",
+                            ],
+                        },
                         "unit": {"type": "string"},
                         "x": {"type": "number"},
                         "y": {"type": "number"},
@@ -205,10 +230,15 @@ def strategy_plan_json_schema() -> dict[str, Any]:
                         "condition": {"type": "string"},
                         "target": {"type": "string"},
                         "at_least": {"type": "number"},
-                        "count": {"type": "number"},
+                        "count": {"type": "integer"},
                         "resource": {"type": "string"},
                         "building": {"type": "string"},
                         "worker": {"type": "string"},
+                        "workers": {"type": "integer"},
+                        "producer": {"type": "string"},
+                        "addon": {"type": "string"},
+                        "upgrade": {"type": "string"},
+                        "mineral_to_gas_ratio": {"type": "number"},
                     },
                     "required": ["type"],
                 },
@@ -230,24 +260,35 @@ def _build_gemini_prompt(request: PlannerRequest) -> str:
             "- move: {type:'move', unit:'worker'|'marine', x:number, y:number}",
             "- attack move: {type:'attack', unit:'worker'|'marine', x:number, y:number}",
             "- attack visible enemy: {type:'attack_enemy', unit:'marine'|'worker'}",
+            "- patrol: {type:'patrol', unit:string, x:number, y:number}",
+            "- hold/stop: {type:'hold'|'stop', unit:string}",
+            "- rally: {type:'rally', building:string, x:number, y:number}",
             "- wait: {type:'wait', seconds:number}",
-            "- wait until condition: {type:'wait_until', condition:'minerals'|'vespene'|'supply_left'|'structure_count'|'structure_ready'|'structure_pending'|'unit_count', target?:string, at_least:number}",
-            "- gather minerals: {type:'gather', unit:'worker', resource:'minerals'}",
-            "- gather gas: {type:'gather', unit:'worker', resource:'vespene'}",
-            "- train unit: {type:'train', unit:'scv'|'marine', count?:integer}",
-            "- build structure: {type:'build', building:'supply_depot'|'barracks'|'refinery', worker:'worker'}",
+            "- wait until condition: {type:'wait_until', condition:'minerals'|'vespene'|'supply_left'|'supply_used'|'supply_cap'|'structure_count'|'structure_ready'|'structure_pending'|'unit_count'|'townhall_count'|'upgrade_complete'|'game_time', target?:string, at_least:number}",
+            "- gather minerals / gather gas: {type:'gather', unit:'worker', resource:'minerals'|'vespene', workers?:integer}",
+            "- distribute workers: {type:'distribute_workers', mineral_to_gas_ratio?:number}",
+            "- train unit: {type:'train', unit:string, count?:integer}",
+            "- build structure: {type:'build', building:string, worker:'worker', count?:integer}",
+            "- expand: {type:'expand', count?:integer}",
+            "- build add-on: {type:'build_addon', addon:string, count?:integer}",
+            "- morph command center: {type:'morph', building:'orbital_command'|'planetary_fortress'}",
+            "- research upgrade: {type:'research', upgrade:string}",
+            "- repair: {type:'repair', target:string, workers?:integer}",
+            build_command_prompt_section(),
             "Constraints:",
             "- Use only actions listed above.",
-            "- Keep plans short, usually 1 to 5 actions.",
+            "- Keep plans short and never exceed 10 actions; use count fields instead of duplicates.",
             "- For early economy requests at game start, prefer train scv and gather minerals.",
             "- Use wait_until minerals before a build when current minerals are too low but the plan should wait rather than fail.",
             "- After build supply_depot, use wait_until structure_ready target supply_depot before build barracks.",
             "- Use gather gas only after a ready refinery exists or after build refinery plus wait_until structure_ready target refinery.",
             "- Use wait_until unit_count target marine after train marine if a later attack needs the trained unit to exist.",
             "- For repeated production, prefer a train action with count instead of many duplicate train actions.",
-            "- Only build supply_depot/barracks/refinery when minerals and prerequisites in Game state JSON make it feasible; otherwise gather/wait/train safer units.",
-            "- Build barracks only after a supply depot is ready or after a prior build supply_depot plus wait_until structure_ready.",
-            "- Train marine only when a barracks is ready in structures_ready.",
+            "- Use only canonical entity keys from the Terran macro command surface below.",
+            "- Read structures_ready, structures_pending, upgrades, resources, and supply from Game state JSON.",
+            "- Before build/train/add-on/morph/research, satisfy every listed prerequisite and cost with prior wait_until/build actions.",
+            "- After build/build_addon/morph/research, add the matching structure_ready or upgrade_complete wait before a dependent action.",
+            "- Build barracks only after a supply depot is ready; build factory after barracks; build starport/armory after factory.",
             "- For scouting requests, move one worker through safe map coordinates near (35,42), (45,42), or (55,45).",
             "- For attack requests, use attack with marine when marines exist; otherwise choose economy or setup actions.",
             "- If the request is ambiguous, choose a safe economy action rather than inventing unsupported actions.",

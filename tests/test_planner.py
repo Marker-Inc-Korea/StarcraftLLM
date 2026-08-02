@@ -14,6 +14,7 @@ from starcraft_llm.planner import (
     create_planner,
     load_gemini_api_key,
     plan_strategy,
+    strategy_plan_json_schema,
 )
 from starcraft_llm.strategy import GatherMineralsCommand, TrainUnitCommand
 
@@ -74,6 +75,38 @@ class PlannerInterfaceTest(unittest.TestCase):
         self.assertIn("attack_enemy", captured["payload"]["input"])
         self.assertIn("gather gas", captured["payload"]["input"])
         self.assertIn("count?:integer", captured["payload"]["input"])
+        self.assertIn("factory_tech_lab", captured["payload"]["input"])
+        self.assertIn("siege_tank", captured["payload"]["input"])
+        self.assertIn("stimpack", captured["payload"]["input"])
+
+    def test_gemini_schema_covers_the_complete_strategy_action_surface(self):
+        action_types = set(
+            strategy_plan_json_schema()["properties"]["actions"]["items"]["properties"]["type"]["enum"]
+        )
+
+        self.assertEqual(
+            action_types,
+            {
+                "move",
+                "attack",
+                "attack_enemy",
+                "patrol",
+                "hold",
+                "stop",
+                "rally",
+                "wait",
+                "wait_until",
+                "gather",
+                "distribute_workers",
+                "train",
+                "build",
+                "expand",
+                "build_addon",
+                "morph",
+                "research",
+                "repair",
+            },
+        )
 
     def test_gemini_planner_accepts_plan_alias_from_model_output(self):
         def fake_post(url, headers, payload, timeout):

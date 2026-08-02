@@ -38,6 +38,10 @@ class FakeTypeId:
         return hash(self.name)
 
 
+def _enum_name(value):
+    return getattr(value, "name", value)
+
+
 class FakeUnit:
     def __init__(self, type_name="SCV", is_ready=True):
         self.type_id = FakeTypeId(type_name)
@@ -60,10 +64,10 @@ class FakeUnit:
         self.gather_targets.append(target)
 
     def train(self, unit_type):
-        self.trained_units.append(unit_type)
+        self.trained_units.append(_enum_name(unit_type))
 
     def build(self, unit_type, target):
-        self.build_orders.append((unit_type, target))
+        self.build_orders.append((_enum_name(unit_type), target))
 
 
 class FakeUnits(list):
@@ -108,8 +112,9 @@ class FakeBotAI:
         return True
 
     async def build(self, unit_type, near, max_distance=20):
-        self.build_orders.append((unit_type, near, max_distance))
-        self.structures.append(FakeUnit(getattr(unit_type, "name", unit_type), is_ready=False))
+        type_name = _enum_name(unit_type)
+        self.build_orders.append((type_name, near, max_distance))
+        self.structures.append(FakeUnit(type_name, is_ready=False))
         return True
 
     def select_build_worker(self, _target):

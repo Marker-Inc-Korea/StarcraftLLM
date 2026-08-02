@@ -27,6 +27,7 @@ class GameStateSummary:
     structures: dict[str, int] = field(default_factory=dict)
     structures_ready: dict[str, int] = field(default_factory=dict)
     structures_pending: dict[str, int] = field(default_factory=dict)
+    upgrades: tuple[str, ...] = ()
 
 
 def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
@@ -44,6 +45,7 @@ def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
         "structures": dict(sorted(summary.structures.items())),
         "structures_ready": dict(sorted(summary.structures_ready.items())),
         "structures_pending": dict(sorted(summary.structures_pending.items())),
+        "upgrades": sorted(summary.upgrades),
         "known_enemy_units": summary.known_enemy_units,
         "game_time_seconds": summary.game_time_seconds,
     }

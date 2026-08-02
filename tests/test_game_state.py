@@ -37,6 +37,7 @@ class GameStateSummaryTest(unittest.TestCase):
                 "structures": {"barracks": 1, "commandcenter": 1},
                 "structures_ready": {"commandcenter": 1},
                 "structures_pending": {"barracks": 1},
+                "upgrades": [],
                 "known_enemy_units": 0,
                 "game_time_seconds": 3.5,
             },

@@ -3,7 +3,17 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, TypeAlias
+from typing import Any, Union
+
+from starcraft_llm.command_catalog import (
+    ADDON_SPECS,
+    MORPH_SPECS,
+    REPAIRABLE_TARGET_KEYS,
+    STRUCTURE_SPECS,
+    UNIT_SPECS,
+    UPGRADE_SPECS,
+    resolve_alias,
+)
 
 
 @dataclass(frozen=True)
@@ -52,6 +62,7 @@ class GatherMineralsCommand:
     """Send a logical worker group to nearby mineral fields."""
 
     unit: str = "worker"
+    workers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +70,7 @@ class GatherGasCommand:
     """Send workers to ready refineries for vespene gathering."""
 
     unit: str = "worker"
+    workers: int | None = None
 
 
 @dataclass(frozen=True)
@@ -75,19 +87,106 @@ class BuildStructureCommand:
 
     building: str
     worker: str = "worker"
+    count: int = 1
 
 
-StrategyAction: TypeAlias = (
-    MoveCommand
-    | AttackMoveCommand
-    | AttackEnemyCommand
-    | WaitCommand
-    | WaitUntilCommand
-    | GatherMineralsCommand
-    | GatherGasCommand
-    | TrainUnitCommand
-    | BuildStructureCommand
-)
+@dataclass(frozen=True)
+class ExpandCommand:
+    """Build one or more command centers at executor-selected expansion sites."""
+
+    count: int = 1
+
+
+@dataclass(frozen=True)
+class BuildAddonCommand:
+    """Attach a Tech Lab or Reactor to an available production structure."""
+
+    addon: str
+    count: int = 1
+
+
+@dataclass(frozen=True)
+class MorphStructureCommand:
+    """Transform a command center into an orbital command or planetary fortress."""
+
+    building: str
+
+
+@dataclass(frozen=True)
+class ResearchUpgradeCommand:
+    """Research one whitelisted Terran upgrade from an available structure."""
+
+    upgrade: str
+
+
+@dataclass(frozen=True)
+class DistributeWorkersCommand:
+    """Rebalance idle and oversaturated workers between minerals and gas."""
+
+    mineral_to_gas_ratio: float = 2.0
+
+
+@dataclass(frozen=True)
+class RepairCommand:
+    """Repair the nearest damaged unit or structure of a requested type."""
+
+    target: str
+    workers: int = 1
+
+
+@dataclass(frozen=True)
+class RallyCommand:
+    """Set production structures' rally point."""
+
+    building: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class PatrolCommand:
+    """Patrol a logical unit group toward a map point."""
+
+    unit: str
+    x: float
+    y: float
+
+
+@dataclass(frozen=True)
+class HoldPositionCommand:
+    """Order a logical unit group to hold position."""
+
+    unit: str
+
+
+@dataclass(frozen=True)
+class StopCommand:
+    """Stop the current orders for a logical unit group."""
+
+    unit: str
+
+
+StrategyAction = Union[
+    MoveCommand,
+    AttackMoveCommand,
+    AttackEnemyCommand,
+    PatrolCommand,
+    HoldPositionCommand,
+    StopCommand,
+    RallyCommand,
+    WaitCommand,
+    WaitUntilCommand,
+    GatherMineralsCommand,
+    GatherGasCommand,
+    DistributeWorkersCommand,
+    TrainUnitCommand,
+    BuildStructureCommand,
+    ExpandCommand,
+    BuildAddonCommand,
+    MorphStructureCommand,
+    ResearchUpgradeCommand,
+    RepairCommand,
+]
 
 
 @dataclass(frozen=True)
@@ -159,17 +258,27 @@ def parse_strategy_plan(text: str, default_unit: str = "worker") -> StrategyPlan
     - move worker 35 42
     - attack marine 55 45
     - attack enemy
+    - patrol marine 45 42
+    - hold marine
+    - stop marine
+    - rally barracks 35 42
     - wait 2
     - wait until minerals 100
     - wait until structure supply depot ready
     - wait until unit marine 1
     - gather minerals
     - gather gas
+    - distribute workers
     - train scv
     - train marine 2
     - build supply depot
     - build barracks
     - build refinery
+    - expand
+    - addon barracks tech lab
+    - morph orbital command
+    - research stimpack
+    - repair barracks
 
     Multiple actions can be separated by semicolons, newlines, or the word
     "then", for example: "move worker 35 42; wait 1; move worker 42 42".
@@ -194,16 +303,39 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         return _parse_move(parts, default_unit=default_unit)
     if verb in {"attack", "attack_move", "attack-move"}:
         return _parse_attack(parts, default_unit=default_unit)
+    if verb == "patrol":
+        return _parse_patrol(parts, default_unit=default_unit)
+    if verb in {"hold", "hold_position", "hold-position"}:
+        return _parse_unit_order(parts, HoldPositionCommand, default_unit=default_unit)
+    if verb == "stop":
+        return _parse_unit_order(parts, StopCommand, default_unit=default_unit)
+    if verb == "rally":
+        return _parse_rally(parts)
     if verb == "wait":
         return _parse_wait(parts)
     if verb == "gather":
         return _parse_gather(parts, default_unit=default_unit)
+    if verb in {"distribute", "distribute_workers", "distribute-workers"}:
+        return _parse_distribute_workers(parts)
     if verb == "train":
         return _parse_train(parts)
     if verb == "build":
         return _parse_build(parts)
+    if verb == "expand":
+        return _parse_expand(parts)
+    if verb in {"addon", "build_addon", "build-addon"}:
+        return _parse_addon(parts)
+    if verb == "morph":
+        return _parse_morph(parts)
+    if verb in {"research", "upgrade"}:
+        return _parse_research(parts)
+    if verb == "repair":
+        return _parse_repair(parts)
 
-    raise StrategyParseError("only 'move', 'attack', 'wait', 'gather', 'train', and 'build' are supported")
+    raise StrategyParseError(
+        "unsupported strategy command; use move, attack, patrol, hold, stop, rally, wait, "
+        "gather, distribute, train, build, expand, addon, morph, research, or repair"
+    )
 
 
 def parse_strategy_plan_json(text: str, default_unit: str = "worker") -> StrategyPlan:
@@ -276,29 +408,59 @@ def translate_strategy_intent(text: str, default_unit: str = "worker") -> Strate
     if any(keyword in normalized for keyword in ("정찰", "scout", "scouting")):
         return _route_plan(unit=unit, route=_SCOUT_ROUTE, wait_seconds=1)
 
-    if any(keyword in normalized for keyword in ("공격", "attack", "rush")):
+    if (
+        any(keyword in normalized for keyword in ("공격", "attack", "rush"))
+        and not any(keyword in normalized for keyword in ("업그레이드", "연구", "upgrade", "research"))
+    ):
         return StrategyPlan(actions=tuple(AttackMoveCommand(unit=unit, x=x, y=y) for x, y in _ATTACK_ROUTE))
 
     if any(keyword in normalized for keyword in ("집결", "전진", "rally", "advance")):
         return _route_plan(unit=unit, route=_RALLY_ROUTE, wait_seconds=0)
 
-    if any(keyword in normalized for keyword in ("서플", "보급고", "supply depot", "supply_depot")):
-        return StrategyPlan(actions=(BuildStructureCommand(building="supply_depot"),))
+    if any(keyword in normalized for keyword in ("일꾼 분배", "일꾼 재배치", "distribute workers", "rebalance workers")):
+        return StrategyPlan(actions=(DistributeWorkersCommand(),))
 
-    if any(keyword in normalized for keyword in ("병영", "배럭", "barracks")):
-        return StrategyPlan(actions=(BuildStructureCommand(building="barracks"),))
-
-    if any(keyword in normalized for keyword in ("정제소", "refinery", "gas")):
-        return StrategyPlan(actions=(BuildStructureCommand(building="refinery"),))
-
-    if any(keyword in normalized for keyword in ("자원", "미네랄", "mineral", "minerals", "gather")):
+    if any(keyword in normalized for keyword in ("채취", "캐", "gather", "harvest")):
+        if any(keyword in normalized for keyword in ("가스", "베스핀", "gas", "vespene")):
+            return StrategyPlan(actions=(GatherGasCommand(unit="worker"),))
         return StrategyPlan(actions=(GatherMineralsCommand(unit="worker"),))
 
-    if any(keyword in normalized for keyword in ("마린 생산", "해병 생산", "train marine", "make marine")):
-        return StrategyPlan(actions=(TrainUnitCommand(unit="marine"),))
+    if any(keyword in normalized for keyword in ("확장", "멀티", "expand", "expansion", "natural")):
+        return StrategyPlan(actions=(ExpandCommand(),))
 
-    if any(keyword in normalized for keyword in ("일꾼 생산", "scv 생산", "train scv", "make scv")):
-        return StrategyPlan(actions=(TrainUnitCommand(unit="scv"),))
+    if any(keyword in normalized for keyword in ("연구", "업그레이드", "research", "upgrade")):
+        upgrade = _catalog_key_from_intent(normalized, UPGRADE_SPECS)
+        if upgrade:
+            return StrategyPlan(actions=(ResearchUpgradeCommand(upgrade=upgrade),))
+
+    if any(keyword in normalized for keyword in ("기술실", "반응로", "tech lab", "techlab", "reactor", "addon", "add-on")):
+        addon = _catalog_key_from_intent(normalized, ADDON_SPECS)
+        if addon:
+            return StrategyPlan(actions=(BuildAddonCommand(addon=addon),))
+
+    morph = _catalog_key_from_intent(normalized, MORPH_SPECS)
+    if morph and any(
+        keyword in normalized
+        for keyword in ("변환", "변신", "올려", "업그레이드", "morph", "upgrade", "만들")
+    ):
+        return StrategyPlan(actions=(MorphStructureCommand(building=morph),))
+
+    if any(keyword in normalized for keyword in ("수리", "repair", "fix")):
+        target = _catalog_key_from_intent(normalized, {**STRUCTURE_SPECS, **MORPH_SPECS, **UNIT_SPECS})
+        if target:
+            return StrategyPlan(actions=(RepairCommand(target="worker" if target == "scv" else target),))
+
+    if any(keyword in normalized for keyword in ("생산", "훈련", "뽑", "train", "make", "produce")):
+        train_unit = _catalog_key_from_intent(normalized, UNIT_SPECS)
+        if train_unit:
+            return StrategyPlan(actions=(TrainUnitCommand(unit=train_unit),))
+
+    building = _catalog_key_from_intent(normalized, STRUCTURE_SPECS)
+    if building:
+        return StrategyPlan(actions=(BuildStructureCommand(building=building),))
+
+    if any(keyword in normalized for keyword in ("자원", "미네랄", "mineral", "minerals")):
+        return StrategyPlan(actions=(GatherMineralsCommand(unit="worker"),))
 
     raise StrategyParseError(f"unknown strategy intent: {text}")
 
@@ -307,9 +469,9 @@ def _parse_move(parts: list[str], default_unit: str) -> MoveCommand:
     if len(parts) == 3:
         unit = default_unit
         x_text, y_text = parts[1:]
-    elif len(parts) == 4:
-        unit = normalize_unit(parts[1])
-        x_text, y_text = parts[2:]
+    elif len(parts) >= 4:
+        unit = normalize_unit(" ".join(parts[1:-2]))
+        x_text, y_text = parts[-2:]
     else:
         raise StrategyParseError("use: move worker 35 42 or move 35 42")
 
@@ -322,15 +484,18 @@ def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand | At
         parts = [parts[0], *parts[2:]]
 
     if _is_enemy_attack(parts):
-        unit = normalize_unit(parts[1]) if len(parts) >= 3 and parts[1].lower() != "nearest" else "marine"
+        unit_parts = parts[1:-1]
+        if unit_parts and unit_parts[-1].lower() == "nearest":
+            unit_parts = unit_parts[:-1]
+        unit = normalize_unit(" ".join(unit_parts)) if unit_parts else "marine"
         return AttackEnemyCommand(unit=unit)
 
     if len(parts) == 3:
         unit = default_unit
         x_text, y_text = parts[1:]
-    elif len(parts) == 4:
-        unit = normalize_unit(parts[1])
-        x_text, y_text = parts[2:]
+    elif len(parts) >= 4:
+        unit = normalize_unit(" ".join(parts[1:-2]))
+        x_text, y_text = parts[-2:]
     else:
         raise StrategyParseError("use: attack marine 55 45, attack move marine 55 45, or attack 55 45")
 
@@ -338,14 +503,35 @@ def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand | At
     return AttackMoveCommand(unit=unit, x=x, y=y)
 
 
+def _parse_patrol(parts: list[str], default_unit: str) -> PatrolCommand:
+    if len(parts) == 3:
+        unit = normalize_unit(default_unit)
+        x_text, y_text = parts[1:]
+    elif len(parts) >= 4:
+        unit = normalize_unit(" ".join(parts[1:-2]))
+        x_text, y_text = parts[-2:]
+    else:
+        raise StrategyParseError("use: patrol marine 55 45 or patrol 55 45")
+    x, y = _parse_coordinates(x_text, y_text)
+    return PatrolCommand(unit=unit, x=x, y=y)
+
+
+def _parse_unit_order(parts: list[str], command_type, default_unit: str) -> HoldPositionCommand | StopCommand:
+    unit = normalize_unit(" ".join(parts[1:])) if len(parts) > 1 else normalize_unit(default_unit)
+    return command_type(unit=unit)
+
+
+def _parse_rally(parts: list[str]) -> RallyCommand:
+    if len(parts) < 4:
+        raise StrategyParseError("use: rally barracks 55 45")
+    building = normalize_production_structure(" ".join(parts[1:-2]))
+    x, y = _parse_coordinates(parts[-2], parts[-1])
+    return RallyCommand(building=building, x=x, y=y)
+
+
 def _is_enemy_attack(parts: list[str]) -> bool:
     lowered = [part.lower() for part in parts]
-    return (
-        lowered == ["attack", "enemy"]
-        or lowered == ["attack", "nearest", "enemy"]
-        or (len(lowered) == 3 and lowered[2] in {"enemy", "enemies"})
-        or (len(lowered) == 4 and lowered[2:] == ["nearest", "enemy"])
-    )
+    return len(lowered) >= 2 and lowered[-1] in {"enemy", "enemies"}
 
 
 def _parse_wait(parts: list[str]) -> WaitCommand | WaitUntilCommand:
@@ -379,14 +565,17 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
         condition = "vespene" if metric in {"vespene", "gas"} else "minerals"
         return WaitUntilCommand(condition=condition, at_least=_parse_at_least(parts[1]))
 
-    if metric in {"supply_left", "supply"}:
-        if metric == "supply" and len(parts) >= 2 and parts[1].lower() == "left":
+    if metric in {"supply_left", "supply_used", "supply_cap", "supply"}:
+        condition = metric
+        if metric == "supply" and len(parts) >= 2 and parts[1].lower() in {"left", "used", "cap"}:
+            condition = f"supply_{parts[1].lower()}"
             value_parts = parts[2:]
         else:
+            condition = "supply_left" if metric == "supply" else metric
             value_parts = parts[1:]
         if len(value_parts) != 1:
-            raise StrategyParseError("use: wait until supply left 1 or wait until supply_left 1")
-        return WaitUntilCommand(condition="supply_left", at_least=_parse_at_least(value_parts[0]))
+            raise StrategyParseError("use: wait until supply left 1, supply used 20, or supply cap 31")
+        return WaitUntilCommand(condition=condition, at_least=_parse_at_least(value_parts[0]))
 
     if metric in {"structure", "building"}:
         return _parse_wait_until_structure(parts[1:])
@@ -399,6 +588,30 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
             target=normalize_wait_unit(parts[1]),
             at_least=_parse_at_least(parts[2]),
         )
+
+    if metric in {"townhall", "townhalls", "base", "bases"}:
+        if len(parts) != 2:
+            raise StrategyParseError("use: wait until townhalls 2")
+        return WaitUntilCommand(condition="townhall_count", at_least=_parse_at_least(parts[1]))
+
+    if metric in {"upgrade", "research"}:
+        if len(parts) < 2:
+            raise StrategyParseError("use: wait until upgrade stimpack complete")
+        upgrade_parts = parts[1:]
+        if upgrade_parts[-1].lower() in {"ready", "complete", "completed", "done"}:
+            upgrade_parts = upgrade_parts[:-1]
+        if not upgrade_parts:
+            raise StrategyParseError("upgrade wait is missing the upgrade name")
+        return WaitUntilCommand(
+            condition="upgrade_complete",
+            target=normalize_upgrade(" ".join(upgrade_parts)),
+            at_least=1,
+        )
+
+    if metric in {"time", "game_time", "seconds"}:
+        if len(parts) != 2:
+            raise StrategyParseError("use: wait until game_time 120")
+        return WaitUntilCommand(condition="game_time", at_least=_parse_at_least(parts[1]))
 
     raise StrategyParseError(f"unsupported wait-until condition: {parts[0]}")
 
@@ -429,10 +642,15 @@ def _parse_wait_until_structure(parts: list[str]) -> WaitUntilCommand:
     else:
         condition = "structure_count"
 
-    return WaitUntilCommand(condition=condition, target=normalize_building(building_text), at_least=at_least)
+    return WaitUntilCommand(condition=condition, target=normalize_structure_target(building_text), at_least=at_least)
 
 
 def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand | GatherGasCommand:
+    workers = None
+    if len(parts) > 2 and _looks_like_positive_int(parts[-1]):
+        workers = _parse_positive_int(parts[-1], "gather worker count")
+        parts = parts[:-1]
+
     if len(parts) == 2:
         unit = default_unit
         resource = parts[1]
@@ -447,25 +665,95 @@ def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand 
 
     normalized_resource = resource.strip().lower()
     if normalized_resource in {"mineral", "minerals", "미네랄"}:
-        return GatherMineralsCommand(unit=unit)
+        return GatherMineralsCommand(unit=unit, workers=workers)
     if normalized_resource in {"gas", "vespene", "vespene_gas", "가스", "베스핀"}:
-        return GatherGasCommand(unit=unit)
+        return GatherGasCommand(unit=unit, workers=workers)
 
     raise StrategyParseError("only mineral and gas gathering are supported in this MVP")
 
 
+def _parse_distribute_workers(parts: list[str]) -> DistributeWorkersCommand:
+    remaining = [part.lower() for part in parts[1:]]
+    if remaining and remaining[0] in {"worker", "workers", "scv", "scvs", "일꾼"}:
+        remaining = remaining[1:]
+    if len(remaining) > 1:
+        raise StrategyParseError("use: distribute workers or distribute workers 2")
+    ratio = _parse_non_negative_number(remaining[0], "mineral-to-gas ratio") if remaining else 2.0
+    if ratio > 20:
+        raise StrategyParseError("mineral-to-gas ratio is too high")
+    return DistributeWorkersCommand(mineral_to_gas_ratio=ratio)
+
+
 def _parse_train(parts: list[str]) -> TrainUnitCommand:
-    if len(parts) not in {2, 3}:
-        raise StrategyParseError("use: train scv, train marine, or train marine 2")
-
-    count = _parse_positive_int(parts[2], "train count") if len(parts) == 3 else 1
-    return TrainUnitCommand(unit=normalize_train_unit(parts[1]), count=count)
-
-
-def _parse_build(parts: list[str]) -> BuildStructureCommand:
     if len(parts) < 2:
-        raise StrategyParseError("use: build supply depot, build barracks, or build refinery")
-    return BuildStructureCommand(building=normalize_building(" ".join(parts[1:])))
+        raise StrategyParseError("use: train scv, train marine 2, or train siege tank")
+
+    count = 1
+    unit_parts = parts[1:]
+    if len(unit_parts) > 1 and _looks_like_positive_int(unit_parts[-1]):
+        count = _parse_positive_int(unit_parts[-1], "train count")
+        unit_parts = unit_parts[:-1]
+    return TrainUnitCommand(unit=normalize_train_unit(" ".join(unit_parts)), count=count)
+
+
+def _parse_build(parts: list[str]) -> BuildStructureCommand | BuildAddonCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: build supply depot, build barracks 2, or build refinery")
+
+    count = 1
+    building_parts = parts[1:]
+    if len(building_parts) > 1 and _looks_like_positive_int(building_parts[-1]):
+        count = _parse_positive_int(building_parts[-1], "build count")
+        building_parts = building_parts[:-1]
+    target = " ".join(building_parts)
+    try:
+        return BuildStructureCommand(building=normalize_building(target), count=count)
+    except StrategyParseError as building_error:
+        try:
+            return BuildAddonCommand(addon=normalize_addon(target), count=count)
+        except StrategyParseError:
+            raise building_error
+
+
+def _parse_expand(parts: list[str]) -> ExpandCommand:
+    if len(parts) > 2:
+        raise StrategyParseError("use: expand or expand 2")
+    count = _parse_positive_int(parts[1], "expand count") if len(parts) == 2 else 1
+    return ExpandCommand(count=count)
+
+
+def _parse_addon(parts: list[str]) -> BuildAddonCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: addon barracks tech lab or addon factory reactor")
+    count = 1
+    addon_parts = parts[1:]
+    if len(addon_parts) > 1 and _looks_like_positive_int(addon_parts[-1]):
+        count = _parse_positive_int(addon_parts[-1], "add-on count")
+        addon_parts = addon_parts[:-1]
+    return BuildAddonCommand(addon=normalize_addon(" ".join(addon_parts)), count=count)
+
+
+def _parse_morph(parts: list[str]) -> MorphStructureCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: morph orbital command or morph planetary fortress")
+    return MorphStructureCommand(building=normalize_morph(" ".join(parts[1:])))
+
+
+def _parse_research(parts: list[str]) -> ResearchUpgradeCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: research stimpack")
+    return ResearchUpgradeCommand(upgrade=normalize_upgrade(" ".join(parts[1:])))
+
+
+def _parse_repair(parts: list[str]) -> RepairCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: repair barracks or repair siege tank 2")
+    workers = 1
+    target_parts = parts[1:]
+    if len(target_parts) > 1 and _looks_like_positive_int(target_parts[-1]):
+        workers = _parse_positive_int(target_parts[-1], "repair worker count")
+        target_parts = target_parts[:-1]
+    return RepairCommand(target=normalize_repair_target(" ".join(target_parts)), workers=workers)
 
 
 def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
@@ -491,6 +779,26 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
     if action_type in {"attack_enemy", "attack-enemy"}:
         return AttackEnemyCommand(unit=normalize_unit(str(payload.get("unit", "marine"))))
 
+    if action_type == "patrol":
+        return PatrolCommand(
+            unit=normalize_unit(str(payload.get("unit", default_unit))),
+            x=_required_number(payload, "x"),
+            y=_required_number(payload, "y"),
+        )
+
+    if action_type in {"hold", "hold_position", "hold-position"}:
+        return HoldPositionCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
+
+    if action_type == "stop":
+        return StopCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
+
+    if action_type in {"rally", "set_rally", "set-rally"}:
+        return RallyCommand(
+            building=normalize_production_structure(str(payload.get("building", payload.get("producer", "")))),
+            x=_required_number(payload, "x"),
+            y=_required_number(payload, "y"),
+        )
+
     if action_type == "wait":
         seconds = _required_number(payload, "seconds")
         if seconds < 0:
@@ -506,16 +814,35 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         if unit != "worker":
             raise StrategyParseError("only workers can gather resources in this MVP")
         if resource in {"mineral", "minerals", "미네랄"}:
-            return GatherMineralsCommand(unit=unit)
+            return GatherMineralsCommand(
+                unit=unit,
+                workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+            )
         if resource in {"gas", "vespene", "vespene_gas", "가스", "베스핀"}:
-            return GatherGasCommand(unit=unit)
+            return GatherGasCommand(
+                unit=unit,
+                workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+            )
         raise StrategyParseError("only mineral and gas gathering are supported in this MVP")
 
     if action_type in {"gather_gas", "gather-gas", "gather_vespene"}:
         unit = normalize_unit(str(payload.get("unit", default_unit)))
         if unit != "worker":
             raise StrategyParseError("only workers can gather gas in this MVP")
-        return GatherGasCommand(unit=unit)
+        return GatherGasCommand(
+            unit=unit,
+            workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+        )
+
+    if action_type in {"distribute_workers", "distribute-workers", "distribute"}:
+        ratio = _optional_number(
+            payload,
+            ("mineral_to_gas_ratio", "resource_ratio", "ratio"),
+            default=2,
+        )
+        if ratio < 0 or ratio > 20:
+            raise StrategyParseError("mineral-to-gas ratio must be between 0 and 20")
+        return DistributeWorkersCommand(mineral_to_gas_ratio=ratio)
 
     if action_type == "train":
         return TrainUnitCommand(
@@ -527,6 +854,37 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         return BuildStructureCommand(
             building=normalize_building(str(payload.get("building", ""))),
             worker=normalize_unit(str(payload.get("worker", "worker"))),
+            count=_positive_int_from_payload(payload, "count", default=1),
+        )
+
+    if action_type == "expand":
+        return ExpandCommand(count=_positive_int_from_payload(payload, "count", default=1))
+
+    if action_type in {"build_addon", "build-addon", "addon"}:
+        addon_value = str(payload.get("addon", ""))
+        producer_value = str(payload.get("producer", "")).strip()
+        if producer_value and addon_value:
+            try:
+                normalize_addon(addon_value)
+            except StrategyParseError:
+                addon_value = f"{producer_value} {addon_value}"
+        return BuildAddonCommand(
+            addon=normalize_addon(addon_value),
+            count=_positive_int_from_payload(payload, "count", default=1),
+        )
+
+    if action_type == "morph":
+        return MorphStructureCommand(
+            building=normalize_morph(str(payload.get("building", payload.get("target", ""))))
+        )
+
+    if action_type in {"research", "upgrade"}:
+        return ResearchUpgradeCommand(upgrade=normalize_upgrade(str(payload.get("upgrade", ""))))
+
+    if action_type == "repair":
+        return RepairCommand(
+            target=normalize_repair_target(str(payload.get("target", ""))),
+            workers=_positive_int_from_payload(payload, "workers", default=1),
         )
 
     raise StrategyParseError(f"unsupported JSON action type: {action_type!r}")
@@ -539,28 +897,75 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         return {"type": "attack", "unit": action.unit, "x": action.x, "y": action.y}
     if isinstance(action, AttackEnemyCommand):
         return {"type": "attack_enemy", "unit": action.unit}
+    if isinstance(action, PatrolCommand):
+        return {"type": "patrol", "unit": action.unit, "x": action.x, "y": action.y}
+    if isinstance(action, HoldPositionCommand):
+        return {"type": "hold", "unit": action.unit}
+    if isinstance(action, StopCommand):
+        return {"type": "stop", "unit": action.unit}
+    if isinstance(action, RallyCommand):
+        return {"type": "rally", "building": action.building, "x": action.x, "y": action.y}
     if isinstance(action, WaitCommand):
         return {"type": "wait", "seconds": action.seconds}
     if isinstance(action, WaitUntilCommand):
-        payload: dict[str, object] = {
+        wait_payload: dict[str, object] = {
             "type": "wait_until",
             "condition": action.condition,
             "at_least": action.at_least,
         }
         if action.target is not None:
-            payload["target"] = action.target
-        return payload
+            wait_payload["target"] = action.target
+        return wait_payload
     if isinstance(action, GatherMineralsCommand):
-        return {"type": "gather", "unit": action.unit, "resource": "minerals"}
+        gather_payload: dict[str, object] = {
+            "type": "gather",
+            "unit": action.unit,
+            "resource": "minerals",
+        }
+        if action.workers is not None:
+            gather_payload["workers"] = action.workers
+        return gather_payload
     if isinstance(action, GatherGasCommand):
-        return {"type": "gather", "unit": action.unit, "resource": "vespene"}
+        gather_gas_payload: dict[str, object] = {
+            "type": "gather",
+            "unit": action.unit,
+            "resource": "vespene",
+        }
+        if action.workers is not None:
+            gather_gas_payload["workers"] = action.workers
+        return gather_gas_payload
+    if isinstance(action, DistributeWorkersCommand):
+        return {"type": "distribute_workers", "mineral_to_gas_ratio": action.mineral_to_gas_ratio}
     if isinstance(action, TrainUnitCommand):
-        payload: dict[str, object] = {"type": "train", "unit": action.unit}
+        train_payload: dict[str, object] = {"type": "train", "unit": action.unit}
         if action.count != 1:
-            payload["count"] = action.count
-        return payload
+            train_payload["count"] = action.count
+        return train_payload
     if isinstance(action, BuildStructureCommand):
-        return {"type": "build", "building": action.building, "worker": action.worker}
+        build_payload: dict[str, object] = {
+            "type": "build",
+            "building": action.building,
+            "worker": action.worker,
+        }
+        if action.count != 1:
+            build_payload["count"] = action.count
+        return build_payload
+    if isinstance(action, ExpandCommand):
+        expand_payload: dict[str, object] = {"type": "expand"}
+        if action.count != 1:
+            expand_payload["count"] = action.count
+        return expand_payload
+    if isinstance(action, BuildAddonCommand):
+        addon_payload: dict[str, object] = {"type": "build_addon", "addon": action.addon}
+        if action.count != 1:
+            addon_payload["count"] = action.count
+        return addon_payload
+    if isinstance(action, MorphStructureCommand):
+        return {"type": "morph", "building": action.building}
+    if isinstance(action, ResearchUpgradeCommand):
+        return {"type": "research", "upgrade": action.upgrade}
+    if isinstance(action, RepairCommand):
+        return {"type": "repair", "target": action.target, "workers": action.workers}
     raise TypeError(f"unsupported strategy action: {action!r}")
 
 
@@ -614,11 +1019,30 @@ def _parse_positive_int(value: str, field_name: str) -> int:
     return parsed
 
 
+def _looks_like_positive_int(value: str) -> bool:
+    try:
+        return int(value) >= 1
+    except ValueError:
+        return False
+
+
+def _parse_non_negative_number(value: str, field_name: str) -> float:
+    try:
+        parsed = float(value)
+    except ValueError as exc:
+        raise StrategyParseError(f"{field_name} must be numeric") from exc
+    if parsed < 0:
+        raise StrategyParseError(f"{field_name} must not be negative")
+    return parsed
+
+
 def _positive_int_from_payload(payload: dict[str, Any], key: str, default: int) -> int:
     if key not in payload:
         return default
     value = payload[key]
     if isinstance(value, bool):
+        raise StrategyParseError(f"strategy JSON field must be an integer: {key}")
+    if isinstance(value, float) and not value.is_integer():
         raise StrategyParseError(f"strategy JSON field must be an integer: {key}")
     try:
         parsed = int(value)
@@ -631,6 +1055,13 @@ def _positive_int_from_payload(payload: dict[str, Any], key: str, default: int) 
     return parsed
 
 
+def _optional_positive_int_from_payload(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+    for key in keys:
+        if key in payload:
+            return _positive_int_from_payload(payload, key, default=1)
+    return None
+
+
 def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
     condition = normalize_wait_condition(str(payload.get("condition", "")))
     at_least = _optional_number(payload, ("at_least", "count", "value", "minimum"), default=1)
@@ -640,10 +1071,13 @@ def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
     target: str | None = None
     if condition.startswith("structure_"):
         target_value = payload.get("target", payload.get("structure", payload.get("building", "")))
-        target = normalize_building(str(target_value))
+        target = normalize_structure_target(str(target_value))
     elif condition == "unit_count":
         target_value = payload.get("target", payload.get("unit", ""))
         target = normalize_wait_unit(str(target_value))
+    elif condition == "upgrade_complete":
+        target_value = payload.get("target", payload.get("upgrade", ""))
+        target = normalize_upgrade(str(target_value))
 
     return WaitUntilCommand(condition=condition, target=target, at_least=at_least)
 
@@ -656,11 +1090,25 @@ def _normalize_intent(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip().lower())
 
 
+def _catalog_key_from_intent(text: str, registry) -> str | None:
+    padded = f" {text.replace('_', ' ')} "
+    matches: list[tuple[int, str]] = []
+    for key, spec in registry.items():
+        names = (key, key.replace("_", " "), spec.enum_name) + spec.aliases
+        for name in names:
+            candidate = name.strip().lower().replace("_", " ")
+            if not candidate:
+                continue
+            if candidate in text and (len(candidate) > 2 or f" {candidate} " in padded):
+                matches.append((len(candidate), key))
+                break
+    return max(matches, default=(0, ""))[1] or None
+
+
 def _unit_from_intent(text: str, default_unit: str) -> str:
-    if any(keyword in text for keyword in ("marine", "마린", "해병")):
-        return "marine"
-    if any(keyword in text for keyword in ("worker", "workers", "scv", "일꾼", "건설로봇")):
-        return "worker"
+    unit = _catalog_key_from_intent(text, UNIT_SPECS)
+    if unit:
+        return "worker" if unit == "scv" else unit
     return normalize_unit(default_unit)
 
 
@@ -674,39 +1122,14 @@ def _route_plan(unit: str, route: tuple[tuple[float, float], ...], wait_seconds:
 
 
 def normalize_train_unit(unit: str) -> str:
-    normalized = unit.strip().lower().replace("_", " ")
-    aliases = {
-        "scv": "scv",
-        "worker": "scv",
-        "workers": "scv",
-        "일꾼": "scv",
-        "건설로봇": "scv",
-        "marine": "marine",
-        "marines": "marine",
-        "마린": "marine",
-        "해병": "marine",
-    }
-    if normalized not in aliases:
-        raise StrategyParseError(f"unsupported train unit for MVP: {unit}")
-    return aliases[normalized]
+    try:
+        return resolve_alias(unit, categories=("unit",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran train unit: {unit}") from exc
 
 
 def normalize_wait_unit(unit: str) -> str:
-    normalized = unit.strip().lower()
-    aliases = {
-        "scv": "worker",
-        "worker": "worker",
-        "workers": "worker",
-        "일꾼": "worker",
-        "건설로봇": "worker",
-        "marine": "marine",
-        "marines": "marine",
-        "마린": "marine",
-        "해병": "marine",
-    }
-    if normalized not in aliases:
-        raise StrategyParseError(f"unsupported wait-until unit for MVP: {unit}")
-    return aliases[normalized]
+    return normalize_unit(unit)
 
 
 def normalize_wait_condition(condition: str) -> str:
@@ -718,6 +1141,8 @@ def normalize_wait_condition(condition: str) -> str:
         "gas": "vespene",
         "supply_left": "supply_left",
         "supply": "supply_left",
+        "supply_used": "supply_used",
+        "supply_cap": "supply_cap",
         "structure": "structure_count",
         "building": "structure_count",
         "structure_count": "structure_count",
@@ -733,6 +1158,16 @@ def normalize_wait_condition(condition: str) -> str:
         "unit": "unit_count",
         "units": "unit_count",
         "unit_count": "unit_count",
+        "townhall": "townhall_count",
+        "townhalls": "townhall_count",
+        "townhall_count": "townhall_count",
+        "base_count": "townhall_count",
+        "upgrade": "upgrade_complete",
+        "upgrade_ready": "upgrade_complete",
+        "upgrade_complete": "upgrade_complete",
+        "research_complete": "upgrade_complete",
+        "time": "game_time",
+        "game_time": "game_time",
     }
     if normalized not in aliases:
         raise StrategyParseError(f"unsupported wait-until condition: {condition}")
@@ -740,41 +1175,64 @@ def normalize_wait_condition(condition: str) -> str:
 
 
 def normalize_building(building: str) -> str:
-    normalized = re.sub(r"[\s-]+", "_", building.strip().lower())
-    aliases = {
-        "supply_depot": "supply_depot",
-        "depot": "supply_depot",
-        "supply": "supply_depot",
-        "서플": "supply_depot",
-        "보급고": "supply_depot",
-        "barracks": "barracks",
-        "rax": "barracks",
-        "배럭": "barracks",
-        "병영": "barracks",
-        "refinery": "refinery",
-        "gas": "refinery",
-        "정제소": "refinery",
-    }
-    if normalized not in aliases:
-        raise StrategyParseError(f"unsupported build structure for MVP: {building}")
-    return aliases[normalized]
+    try:
+        return resolve_alias(building, categories=("structure",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran build structure: {building}") from exc
+
+
+def normalize_structure_target(building: str) -> str:
+    try:
+        return resolve_alias(building, categories=("structure", "addon", "morph")).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran structure target: {building}") from exc
+
+
+def normalize_production_structure(building: str) -> str:
+    normalized = normalize_structure_target(building)
+    if normalized not in {"command_center", "orbital_command", "planetary_fortress", "barracks", "factory", "starport"}:
+        raise StrategyParseError(f"structure cannot rally produced units: {building}")
+    return normalized
+
+
+def normalize_addon(addon: str) -> str:
+    try:
+        return resolve_alias(addon, categories=("addon",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran production add-on: {addon}") from exc
+
+
+def normalize_morph(building: str) -> str:
+    try:
+        return resolve_alias(building, categories=("morph",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran structure morph: {building}") from exc
+
+
+def normalize_upgrade(upgrade: str) -> str:
+    try:
+        return resolve_alias(upgrade, categories=("upgrade",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran upgrade: {upgrade}") from exc
+
+
+def normalize_repair_target(target: str) -> str:
+    try:
+        resolved = resolve_alias(target, categories=("unit", "structure", "addon", "morph"))
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran repair target: {target}") from exc
+    canonical = "worker" if resolved.category == "unit" and resolved.key == "scv" else resolved.key
+    if canonical not in REPAIRABLE_TARGET_KEYS:
+        raise StrategyParseError(f"Terran SCVs cannot repair biological target: {target}")
+    return canonical
 
 
 def normalize_unit(unit: str) -> str:
     normalized = unit.strip().lower()
-    aliases = {
-        "scv": "worker",
-        "probe": "worker",
-        "drone": "worker",
-        "worker": "worker",
-        "workers": "worker",
-        "일꾼": "worker",
-        "건설로봇": "worker",
-        "marine": "marine",
-        "marines": "marine",
-        "마린": "marine",
-        "해병": "marine",
-    }
-    if normalized not in aliases:
-        raise StrategyParseError(f"unsupported unit for MVP: {unit}")
-    return aliases[normalized]
+    if normalized in {"probe", "drone"}:
+        return "worker"
+    try:
+        key = resolve_alias(unit, categories=("unit",)).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported controllable Terran unit: {unit}") from exc
+    return "worker" if key == "scv" else key

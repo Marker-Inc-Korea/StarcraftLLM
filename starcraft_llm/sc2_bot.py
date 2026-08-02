@@ -9,8 +9,17 @@ import platform
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
+from starcraft_llm.command_catalog import (
+    ADDON_SPECS,
+    MORPH_SPECS,
+    STRUCTURE_SPECS,
+    UNIT_SPECS,
+    UPGRADE_SPECS,
+    normalize_name,
+    resolve_alias,
+)
 from starcraft_llm.game_state import (
     GameStateSummary,
     SupplySummary,
@@ -26,10 +35,20 @@ from starcraft_llm.planner import (
 from starcraft_llm.strategy import (
     AttackEnemyCommand,
     AttackMoveCommand,
+    BuildAddonCommand,
     BuildStructureCommand,
+    DistributeWorkersCommand,
+    ExpandCommand,
     GatherGasCommand,
     GatherMineralsCommand,
+    HoldPositionCommand,
+    MorphStructureCommand,
     MoveCommand,
+    PatrolCommand,
+    RallyCommand,
+    RepairCommand,
+    ResearchUpgradeCommand,
+    StopCommand,
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
@@ -131,6 +150,15 @@ def summarize_bot_state(bot) -> GameStateSummary:
         else:
             structures_pending[name] = structures_pending.get(name, 0) + 1
 
+    upgrades = []
+    state = getattr(bot, "state", None)
+    for upgrade in getattr(state, "upgrades", ()):
+        raw_name = getattr(upgrade, "name", str(upgrade))
+        try:
+            upgrades.append(resolve_alias(raw_name, categories=("upgrade",)).key)
+        except KeyError:
+            upgrades.append(normalize_name(raw_name))
+
     return GameStateSummary(
         minerals=int(bot.minerals),
         vespene=int(bot.vespene),
@@ -147,6 +175,7 @@ def summarize_bot_state(bot) -> GameStateSummary:
         structures=structures,
         structures_ready=structures_ready,
         structures_pending=structures_pending,
+        upgrades=tuple(sorted(set(upgrades))),
     )
 
 
@@ -185,7 +214,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             self.observed_summary: GameStateSummary | None = None
             self._current_action_index = 0
             self._action_started_at_loop_time: float | None = None
-            self._action_context: dict[str, object] = {}
+            self._action_context: dict[str, Any] = {}
             self._plan_finished_at_loop_time: float | None = None
             self._left_game = False
 
@@ -242,14 +271,14 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _print_plan_loaded(self) -> None:
             if self.plan is None:
                 return
-            print(f"Strategy plan loaded: {len(self.plan.actions)} action(s)")
+            print(f"Strategy plan loaded: {self._plan_action_count()} action(s)")
             for index, action in enumerate(self.plan.actions, start=1):
                 print(f"  {index}. {self._describe_action(action)}")
 
         async def _execute_current_action(self, iteration: int) -> None:
             if self.plan is None:
                 raise RuntimeError("strategy plan is not loaded")
-            if self._current_action_index >= len(self.plan.actions):
+            if self._current_action_index >= self._plan_action_count():
                 self._mark_plan_finished()
                 return
 
@@ -263,6 +292,18 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, AttackEnemyCommand):
                 self._execute_attack_enemy(action, iteration)
                 return
+            if isinstance(action, PatrolCommand):
+                self._execute_patrol(action, iteration)
+                return
+            if isinstance(action, HoldPositionCommand):
+                self._execute_unit_order(action, iteration, "hold_position")
+                return
+            if isinstance(action, StopCommand):
+                self._execute_unit_order(action, iteration, "stop")
+                return
+            if isinstance(action, RallyCommand):
+                self._execute_rally(action, iteration)
+                return
             if isinstance(action, WaitCommand):
                 self._execute_wait(action)
                 return
@@ -275,11 +316,29 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, GatherGasCommand):
                 self._execute_gather_gas(action, iteration)
                 return
+            if isinstance(action, DistributeWorkersCommand):
+                await self._execute_distribute_workers(action)
+                return
             if isinstance(action, TrainUnitCommand):
                 self._execute_train(action, iteration)
                 return
             if isinstance(action, BuildStructureCommand):
                 await self._execute_build(action, iteration)
+                return
+            if isinstance(action, ExpandCommand):
+                await self._execute_expand(action, iteration)
+                return
+            if isinstance(action, BuildAddonCommand):
+                self._execute_addon(action, iteration)
+                return
+            if isinstance(action, MorphStructureCommand):
+                self._execute_morph(action, iteration)
+                return
+            if isinstance(action, ResearchUpgradeCommand):
+                self._execute_research(action, iteration)
+                return
+            if isinstance(action, RepairCommand):
+                self._execute_repair(action, iteration)
                 return
 
             raise TypeError(f"unsupported strategy action: {action!r}")
@@ -291,7 +350,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 for unit in units:
                     unit.move(target)
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued move command to {len(units)} {command.unit} unit(s): {target}"
                 )
                 self._advance_action()
@@ -305,7 +364,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 for unit in units:
                     unit.attack(target)
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued attack command to {len(units)} {command.unit} unit(s): {target}"
                 )
                 self._advance_action()
@@ -320,19 +379,61 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 for unit in units:
                     unit.attack(target)
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued attack command to {len(units)} {command.unit} unit(s) against visible enemy"
                 )
                 self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for controllable {command.unit} units and visible enemies before attacking...")
 
+        def _execute_patrol(self, command: PatrolCommand, iteration: int) -> None:
+            units = self._select_exact_units(command.unit)
+            if units:
+                target = point2_class((command.x, command.y))
+                for unit in units:
+                    unit.patrol(target)
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"issued patrol command to {len(units)} {command.unit} unit(s): {target}"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for controllable {command.unit} units before patrolling...")
+
+        def _execute_unit_order(self, command, iteration: int, method_name: str) -> None:
+            units = self._select_exact_units(command.unit)
+            if units:
+                for unit in units:
+                    getattr(unit, method_name)()
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"issued {method_name.replace('_', ' ')} to {len(units)} {command.unit} unit(s)"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for controllable {command.unit} units before {method_name.replace('_', ' ')}...")
+
+        def _execute_rally(self, command: RallyCommand, iteration: int) -> None:
+            structures = self._ready_idle_structures(command.building)
+            if structures:
+                target = point2_class((command.x, command.y))
+                ability = self._rally_ability(command.building)
+                for structure in structures:
+                    structure(ability, target)
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"set {len(structures)} {command.building} rally point(s): {target}"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for a ready {command.building} before setting rally point...")
+
         def _execute_wait(self, command: WaitCommand) -> None:
             now = asyncio.get_running_loop().time()
             if self._action_started_at_loop_time is None:
                 self._action_started_at_loop_time = now
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"waiting {command.seconds:g} second(s)"
                 )
 
@@ -344,7 +445,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             current = self._wait_until_observed_value(command)
             if current >= command.at_least:
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"condition met: {self._describe_action(command)} (current={current:g})"
                 )
                 self._advance_action()
@@ -353,7 +454,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if self._action_started_at_loop_time is None:
                 self._action_started_at_loop_time = asyncio.get_running_loop().time()
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"waiting until {self._describe_action(command)} (current={current:g})"
                 )
             elif iteration % 22 == 0:
@@ -364,12 +465,13 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             mineral_fields = self.mineral_field
             if workers and mineral_fields:
                 issued = 0
-                for worker in workers:
+                selected_workers = workers[: command.workers] if command.workers is not None else workers
+                for worker in selected_workers:
                     mineral_field = self._closest_mineral_field(mineral_fields, worker)
                     worker.gather(mineral_field)
                     issued += 1
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued gather minerals command to {issued} worker unit(s)"
                 )
                 self._advance_action()
@@ -381,21 +483,30 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             refineries = self._ready_refineries()
             if workers and refineries:
                 issued = 0
-                max_workers = min(len(workers), len(refineries) * 3)
+                requested_workers = command.workers if command.workers is not None else len(refineries) * 3
+                max_workers = min(len(workers), len(refineries) * 3, requested_workers)
                 for index, worker in enumerate(workers[:max_workers]):
                     refinery = refineries[index % len(refineries)]
                     worker.gather(refinery)
                     issued += 1
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued gather gas command to {issued} worker unit(s)"
                 )
                 self._advance_action()
             elif iteration % 22 == 0:
                 print("Waiting for workers and ready refineries before gathering gas...")
 
+        async def _execute_distribute_workers(self, command: DistributeWorkersCommand) -> None:
+            await self.distribute_workers(resource_ratio=command.mineral_to_gas_ratio)
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"distributed workers at mineral-to-gas ratio {command.mineral_to_gas_ratio:g}"
+            )
+            self._advance_action()
+
         def _execute_train(self, command: TrainUnitCommand, iteration: int) -> None:
-            if command.unit not in {"scv", "marine"}:
+            if command.unit not in UNIT_SPECS:
                 raise TypeError(f"unsupported train unit: {command.unit}")
             if command.count < 1:
                 raise TypeError(f"unsupported train count: {command.count}")
@@ -423,33 +534,40 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             issued_count += 1
             self._action_context["issued"] = issued_count
             print(
-                f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                 f"issued train {command.unit} command ({issued_count}/{command.count})"
             )
             if issued_count >= command.count:
                 self._advance_action()
 
         async def _execute_build(self, command: BuildStructureCommand, iteration: int) -> None:
-            if command.building not in {"supply_depot", "barracks", "refinery"}:
+            if command.building not in STRUCTURE_SPECS:
                 raise TypeError(f"unsupported build structure: {command.building}")
+            if command.building == "command_center":
+                await self._execute_expand(ExpandCommand(count=command.count), iteration)
+                return
 
             unit_type = self._building_unit_type(command.building)
             if not self._action_context:
                 self._action_context = {
                     "building": command.building,
                     "total_before": self._structure_count(command.building, readiness="total"),
-                    "issued": False,
+                    "issued": 0,
                 }
 
-            if self._action_context.get("issued"):
-                if self._build_started_since_action_start(command.building):
+            issued_count = int(self._action_context.get("issued", 0))
+            started_count = self._builds_started_since_action_start(command.building)
+            if issued_count and started_count >= issued_count:
+                if issued_count >= command.count:
                     print(
-                        f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
-                        f"build {command.building} started"
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"{command.count} build {command.building} command(s) started"
                     )
                     self._advance_action()
-                elif iteration % 22 == 0:
-                    print(f"Waiting for {command.building} construction to start...")
+                    return
+            elif issued_count:
+                if iteration % 22 == 0:
+                    print(f"Waiting for {command.building} construction to start ({started_count}/{issued_count})...")
                 return
 
             if hasattr(self, "can_afford") and not self.can_afford(unit_type):
@@ -464,23 +582,191 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 issued = await self.build(unit_type, near=near, max_distance=20)
 
             if issued:
-                self._action_context["issued"] = True
+                issued_count += 1
+                self._action_context["issued"] = issued_count
                 print(
-                    f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
-                    f"issued build {command.building} command"
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"issued build {command.building} command ({issued_count}/{command.count})"
                 )
-                if self._build_started_since_action_start(command.building):
+                if self._builds_started_since_action_start(command.building) >= command.count:
                     print(
-                        f"Action {self._current_action_index + 1}/{len(self.plan.actions)}: "
-                        f"build {command.building} started"
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"{command.count} build {command.building} command(s) started"
                     )
                     self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for placement/worker to build {command.building}...")
 
-        def _build_started_since_action_start(self, building: str) -> bool:
+        async def _execute_expand(self, command: ExpandCommand, iteration: int) -> None:
+            if not self._action_context:
+                self._action_context = {"townhalls_before": len(self.townhalls), "issued": 0}
+            issued_count = int(self._action_context.get("issued", 0))
+            started_count = max(0, len(self.townhalls) - int(self._action_context.get("townhalls_before", 0)))
+            if issued_count and started_count >= issued_count:
+                if issued_count >= command.count:
+                    print(
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"{command.count} expansion command(s) started"
+                    )
+                    self._advance_action()
+                    return
+            elif issued_count:
+                if iteration % 22 == 0:
+                    print(f"Waiting for expansion construction to start ({started_count}/{issued_count})...")
+                return
+
+            command_center_type = self._building_unit_type("command_center")
+            if hasattr(self, "can_afford") and not self.can_afford(command_center_type):
+                if iteration % 22 == 0:
+                    print("Waiting for enough resources to expand...")
+                return
+            issued = await self._issue_expansion(command_center_type)
+            if not issued:
+                if iteration % 22 == 0:
+                    print("Waiting for an available expansion location and build worker...")
+                return
+            issued_count += 1
+            self._action_context["issued"] = issued_count
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"issued expansion command ({issued_count}/{command.count})"
+            )
+            if len(self.townhalls) - int(self._action_context.get("townhalls_before", 0)) >= command.count:
+                self._advance_action()
+
+        def _execute_addon(self, command: BuildAddonCommand, iteration: int) -> None:
+            if command.addon not in ADDON_SPECS:
+                raise TypeError(f"unsupported production add-on: {command.addon}")
+            if not self._action_context:
+                self._action_context = {"issued": 0, "producer_tags": set()}
+            issued_count = int(self._action_context.get("issued", 0))
+            if issued_count >= command.count:
+                self._advance_action()
+                return
+
+            spec = ADDON_SPECS[command.addon]
+            producers = self._free_addon_producers(spec.producer or "")
+            used_tags = self._action_context.get("producer_tags", set())
+            producer = next((item for item in producers if getattr(item, "tag", id(item)) not in used_tags), None)
+            if producer is None:
+                if iteration % 22 == 0:
+                    print(f"Waiting for a free {spec.producer} to build {command.addon}...")
+                return
+            addon_type = self._addon_unit_type(command.addon)
+            if hasattr(self, "can_afford") and not self.can_afford(addon_type):
+                if iteration % 22 == 0:
+                    print(f"Waiting for enough resources to build {command.addon}...")
+                return
+            issued = producer.build(addon_type)
+            if issued is False:
+                return
+            used_tags.add(getattr(producer, "tag", id(producer)))
+            issued_count += 1
+            self._action_context["issued"] = issued_count
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"issued build {command.addon} command ({issued_count}/{command.count})"
+            )
+            if issued_count >= command.count:
+                self._advance_action()
+
+        def _execute_morph(self, command: MorphStructureCommand, iteration: int) -> None:
+            if command.building not in MORPH_SPECS:
+                raise TypeError(f"unsupported structure morph: {command.building}")
+            sources = self._available_command_centers()
+            if not sources:
+                if iteration % 22 == 0:
+                    print(f"Waiting for an available command center to morph {command.building}...")
+                return
+            target_type = self._morph_unit_type(command.building)
+            if hasattr(self, "can_afford") and not self.can_afford(target_type):
+                if iteration % 22 == 0:
+                    print(f"Waiting for enough resources to morph {command.building}...")
+                return
+            issued = self._first_unit(sources).build(target_type)
+            if issued is False:
+                return
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"issued morph {command.building} command"
+            )
+            self._advance_action()
+
+        def _execute_research(self, command: ResearchUpgradeCommand, iteration: int) -> None:
+            if command.upgrade not in UPGRADE_SPECS:
+                raise TypeError(f"unsupported Terran upgrade: {command.upgrade}")
+            upgrade_type = self._upgrade_id(command.upgrade)
+            if hasattr(self, "already_pending_upgrade") and self.already_pending_upgrade(upgrade_type) > 0:
+                self._advance_action()
+                return
+            if hasattr(self, "can_afford") and not self.can_afford(upgrade_type):
+                if iteration % 22 == 0:
+                    print(f"Waiting for enough resources to research {command.upgrade}...")
+                return
+            if hasattr(self, "research"):
+                issued = self.research(upgrade_type)
+            else:
+                researcher = self._first_unit(self._ready_idle_structures(UPGRADE_SPECS[command.upgrade].researcher or ""))
+                issued = researcher.research(upgrade_type) if researcher else False
+            if issued:
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"issued research {command.upgrade} command"
+                )
+                self._advance_action()
+            elif iteration % 22 == 0:
+                print(f"Waiting for an available researcher for {command.upgrade}...")
+
+        def _execute_repair(self, command: RepairCommand, iteration: int) -> None:
+            targets = self._repair_targets(command.target)
+            if not targets:
+                if iteration % 22 == 0:
+                    print(f"Waiting for repair target {command.target}...")
+                return
+            damaged = [target for target in targets if self._is_damaged(target)]
+            if not damaged:
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"repair target {command.target} is already at full health"
+                )
+                self._advance_action()
+                return
+            workers = self.workers[: command.workers]
+            if not workers:
+                if iteration % 22 == 0:
+                    print("Waiting for workers before repairing...")
+                return
+            target = damaged[0]
+            for worker in workers:
+                worker.repair(target)
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"issued repair command with {len(workers)} worker(s)"
+            )
+            self._advance_action()
+
+        def _builds_started_since_action_start(self, building: str) -> int:
             total_before = int(self._action_context.get("total_before", 0))
-            return self._structure_count(building, readiness="total") > total_before
+            return max(0, self._structure_count(building, readiness="total") - total_before)
+
+        async def _issue_expansion(self, command_center_type) -> bool:
+            if hasattr(self, "get_next_expansion"):
+                location = await self.get_next_expansion()
+                if location is None:
+                    return False
+                return bool(
+                    await self.build(
+                        command_center_type,
+                        near=location,
+                        max_distance=10,
+                        random_alternative=False,
+                        placement_step=1,
+                    )
+                )
+
+            # Lightweight injected runtimes can implement only expand_now.
+            await self.expand_now(building=command_center_type)
+            return True
 
         @staticmethod
         def _closest_mineral_field(mineral_fields, worker):
@@ -503,15 +789,48 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             return townhalls
 
         def _available_producers(self, unit: str):
-            if unit == "scv":
+            spec = UNIT_SPECS[unit]
+            if spec.producer == "command_center":
                 return self._available_townhalls()
+            producers = self._ready_idle_structures(spec.producer or "")
+            if spec.required_addon:
+                producers = [
+                    producer for producer in producers if self._producer_has_addon(producer, spec.required_addon)
+                ]
+            return producers
 
-            barracks = self._structures_of_type(self._unit_type_id().BARRACKS)
-            if hasattr(barracks, "ready"):
-                barracks = barracks.ready
-            if hasattr(barracks, "idle"):
-                barracks = barracks.idle
-            return barracks
+        def _ready_idle_structures(self, building: str):
+            structures = self._structures_of_type(self._structure_unit_type(building))
+            if hasattr(structures, "ready"):
+                structures = structures.ready
+            if hasattr(structures, "idle"):
+                structures = structures.idle
+            return structures
+
+        def _free_addon_producers(self, producer: str):
+            structures = self._ready_idle_structures(producer)
+            return [
+                structure
+                for structure in structures
+                if not getattr(structure, "has_add_on", False) and not getattr(structure, "add_on_tag", 0)
+            ]
+
+        def _producer_has_addon(self, producer, addon: str) -> bool:
+            if addon.endswith("tech_lab") and getattr(producer, "has_techlab", False):
+                return True
+            if addon.endswith("reactor") and getattr(producer, "has_reactor", False):
+                return True
+            add_on_tag = getattr(producer, "add_on_tag", 0)
+            if addon.endswith("tech_lab") and add_on_tag in getattr(self, "techlab_tags", set()):
+                return True
+            if addon.endswith("reactor") and add_on_tag in getattr(self, "reactor_tags", set()):
+                return True
+            # Lightweight injected test runtimes do not model add-on tags. The
+            # validated StrategyPlan remains the prerequisite authority there.
+            return not hasattr(producer, "add_on_tag")
+
+        def _available_command_centers(self):
+            return self._ready_idle_structures("command_center")
 
         def _structures_of_type(self, unit_type):
             structures = getattr(self, "structures", [])
@@ -526,7 +845,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             return refineries
 
         def _structure_count(self, building: str, readiness: str = "total") -> int:
-            structures = self._structures_of_type(self._building_unit_type(building))
+            structures = self._structures_of_type(self._structure_unit_type(building))
             if readiness == "total":
                 return len(structures)
             if readiness == "ready":
@@ -542,12 +861,23 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return float(self.vespene)
             if command.condition == "supply_left":
                 return float(self.supply_left)
+            if command.condition == "supply_used":
+                return float(self.supply_used)
+            if command.condition == "supply_cap":
+                return float(self.supply_cap)
+            if command.condition == "townhall_count":
+                return float(len(self.townhalls))
+            if command.condition == "game_time":
+                return float(getattr(self, "time", 0.0))
             if command.condition == "unit_count":
                 if command.target == "worker":
                     return float(len(self.workers))
-                if command.target == "marine":
-                    return float(len(self.units.of_type({self._unit_type_id().MARINE})))
-                return 0.0
+                return float(len(self._select_exact_units(command.target or "")))
+            if command.condition == "upgrade_complete":
+                upgrade = command.target or ""
+                upgrade_type = self._upgrade_id(upgrade)
+                completed: set[Any] = getattr(getattr(self, "state", None), "upgrades", set())
+                return 1.0 if upgrade_type in completed else 0.0
             if command.condition == "structure_count":
                 return float(self._structure_count(command.target or "", readiness="total"))
             if command.condition == "structure_ready":
@@ -580,13 +910,19 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return units.first
             return units[0]
 
+        def _plan_action_count(self) -> int:
+            plan = self.plan
+            if plan is None:
+                raise RuntimeError("strategy plan is not loaded")
+            return len(plan.actions)
+
         def _advance_action(self) -> None:
             self._current_action_index += 1
             self._action_started_at_loop_time = None
             self._action_context = {}
             if self.plan is None:
                 raise RuntimeError("strategy plan is not loaded")
-            if self._current_action_index >= len(self.plan.actions):
+            if self._current_action_index >= self._plan_action_count():
                 self._mark_plan_finished()
 
         def _mark_plan_finished(self) -> None:
@@ -595,36 +931,65 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 print("Strategy plan actions complete.")
 
         def _select_units(self, unit: str):
-            if unit == "worker":
-                return self.workers
-            if unit == "marine":
-                marines = self.units.of_type({self._unit_type_id().MARINE})
-                return marines if marines else self.workers
-            return self.workers
+            return self._select_exact_units(unit)
 
         def _select_exact_units(self, unit: str):
             if unit == "worker":
                 return self.workers
-            if unit == "marine":
-                return self.units.of_type({self._unit_type_id().MARINE})
-            return []
+            if unit not in UNIT_SPECS:
+                return []
+            return self.units.of_type({self._train_unit_type(unit)})
 
         def _train_unit_type(self, unit: str):
-            if unit == "scv":
-                return self._unit_type_id().SCV
-            if unit == "marine":
-                return self._unit_type_id().MARINE
-            raise TypeError(f"unsupported train unit: {unit}")
+            if unit not in UNIT_SPECS:
+                raise TypeError(f"unsupported train unit: {unit}")
+            return getattr(self._unit_type_id(), UNIT_SPECS[unit].enum_name)
 
         def _building_unit_type(self, building: str):
-            unit_type_id = self._unit_type_id()
-            if building == "supply_depot":
-                return unit_type_id.SUPPLYDEPOT
-            if building == "barracks":
-                return unit_type_id.BARRACKS
-            if building == "refinery":
-                return unit_type_id.REFINERY
-            raise TypeError(f"unsupported build structure: {building}")
+            if building not in STRUCTURE_SPECS:
+                raise TypeError(f"unsupported build structure: {building}")
+            return getattr(self._unit_type_id(), STRUCTURE_SPECS[building].enum_name)
+
+        def _structure_unit_type(self, building: str):
+            for registry in (STRUCTURE_SPECS, ADDON_SPECS, MORPH_SPECS):
+                if building in registry:
+                    return getattr(self._unit_type_id(), registry[building].enum_name)
+            raise TypeError(f"unsupported structure: {building}")
+
+        def _addon_unit_type(self, addon: str):
+            return getattr(self._unit_type_id(), ADDON_SPECS[addon].enum_name)
+
+        def _morph_unit_type(self, building: str):
+            return getattr(self._unit_type_id(), MORPH_SPECS[building].enum_name)
+
+        def _upgrade_id(self, upgrade: str):
+            if upgrade not in UPGRADE_SPECS:
+                raise TypeError(f"unsupported Terran upgrade: {upgrade}")
+            return getattr(self._upgrade_id_class(), UPGRADE_SPECS[upgrade].enum_name)
+
+        def _repair_targets(self, target: str):
+            if target == "worker":
+                return self.workers
+            if target in UNIT_SPECS:
+                return self.units.of_type({self._train_unit_type(target)})
+            return self._structures_of_type(self._structure_unit_type(target))
+
+        @staticmethod
+        def _is_damaged(unit) -> bool:
+            health_percentage = getattr(unit, "health_percentage", None)
+            if health_percentage is not None:
+                return float(health_percentage) < 1.0
+            health = getattr(unit, "health", None)
+            health_max = getattr(unit, "health_max", None)
+            if health is not None and health_max:
+                return float(health) < float(health_max)
+            return False
+
+        def _rally_ability(self, building: str):
+            ability_id = self._ability_id()
+            if building in {"command_center", "orbital_command", "planetary_fortress"}:
+                return ability_id.RALLY_COMMANDCENTER
+            return ability_id.RALLY_BUILDING
 
         @staticmethod
         def _unit_type_id():
@@ -634,13 +999,39 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return UnitTypeId
             except ImportError:
                 class _FallbackUnitTypeId:
-                    SCV = "SCV"
-                    MARINE = "MARINE"
-                    SUPPLYDEPOT = "SUPPLYDEPOT"
-                    BARRACKS = "BARRACKS"
-                    REFINERY = "REFINERY"
+                    pass
+
+                for spec in (*UNIT_SPECS.values(), *STRUCTURE_SPECS.values(), *ADDON_SPECS.values(), *MORPH_SPECS.values()):
+                    setattr(_FallbackUnitTypeId, spec.enum_name, spec.enum_name)
 
                 return _FallbackUnitTypeId
+
+        @staticmethod
+        def _upgrade_id_class():
+            try:
+                from sc2.ids.upgrade_id import UpgradeId
+
+                return UpgradeId
+            except ImportError:
+                class _FallbackUpgradeId:
+                    pass
+
+                for spec in UPGRADE_SPECS.values():
+                    setattr(_FallbackUpgradeId, spec.enum_name, spec.enum_name)
+                return _FallbackUpgradeId
+
+        @staticmethod
+        def _ability_id():
+            try:
+                from sc2.ids.ability_id import AbilityId
+
+                return AbilityId
+            except ImportError:
+                class _FallbackAbilityId:
+                    RALLY_COMMANDCENTER = "RALLY_COMMANDCENTER"
+                    RALLY_BUILDING = "RALLY_BUILDING"
+
+                return _FallbackAbilityId
 
         def _should_stop(self) -> bool:
             if self._plan_finished_at_loop_time is None:
@@ -656,6 +1047,14 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"attack with {action.unit} toward ({action.x:g}, {action.y:g})"
             if isinstance(action, AttackEnemyCommand):
                 return f"attack visible enemy with {action.unit}"
+            if isinstance(action, PatrolCommand):
+                return f"patrol {action.unit} toward ({action.x:g}, {action.y:g})"
+            if isinstance(action, HoldPositionCommand):
+                return f"hold position with {action.unit}"
+            if isinstance(action, StopCommand):
+                return f"stop {action.unit}"
+            if isinstance(action, RallyCommand):
+                return f"rally {action.building} to ({action.x:g}, {action.y:g})"
             if isinstance(action, WaitCommand):
                 return f"wait {action.seconds:g} second(s)"
             if isinstance(action, WaitUntilCommand):
@@ -665,10 +1064,22 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"gather minerals with {action.unit}"
             if isinstance(action, GatherGasCommand):
                 return f"gather gas with {action.unit}"
+            if isinstance(action, DistributeWorkersCommand):
+                return f"distribute workers at ratio {action.mineral_to_gas_ratio:g}"
             if isinstance(action, TrainUnitCommand):
                 return f"train {action.unit}" if action.count == 1 else f"train {action.count} {action.unit}"
             if isinstance(action, BuildStructureCommand):
-                return f"build {action.building}"
+                return f"build {action.building}" if action.count == 1 else f"build {action.count} {action.building}"
+            if isinstance(action, ExpandCommand):
+                return "expand" if action.count == 1 else f"expand {action.count} times"
+            if isinstance(action, BuildAddonCommand):
+                return f"build {action.addon}" if action.count == 1 else f"build {action.count} {action.addon}"
+            if isinstance(action, MorphStructureCommand):
+                return f"morph {action.building}"
+            if isinstance(action, ResearchUpgradeCommand):
+                return f"research {action.upgrade}"
+            if isinstance(action, RepairCommand):
+                return f"repair {action.target} with {action.workers} worker(s)"
             return repr(action)
 
     return _MoveUnitBot
