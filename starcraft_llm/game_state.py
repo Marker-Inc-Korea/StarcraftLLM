@@ -13,6 +13,46 @@ class SupplySummary:
 
 
 @dataclass(frozen=True)
+class UnitObservation:
+    """Ability-relevant observation for one known unit or structure.
+
+    These fields are planner context only. In particular, energy, cargo, order,
+    and form flags are not proof that an ability is currently available; the SC2
+    executor must still query live available abilities immediately before
+    issuing stateful commands.
+    """
+
+    unit: str
+    alliance: str = "self"
+    tag: int | str | None = None
+    x: float | None = None
+    y: float | None = None
+    health: float | None = None
+    health_max: float | None = None
+    energy: float | None = None
+    is_ready: bool | None = None
+    is_flying: bool | None = None
+    is_burrowed: bool | None = None
+    is_loaded: bool | None = None
+    is_idle: bool | None = None
+    cargo_used: int | None = None
+    cargo_max: int | None = None
+    orders: tuple[str, ...] = ()
+
+
+UnitObservationSnapshot = UnitObservation
+
+
+@dataclass(frozen=True)
+class LocationSnapshot:
+    """Executor-observed point for an allowlisted semantic location."""
+
+    x: float
+    y: float
+    resolved: bool = True
+
+
+@dataclass(frozen=True)
 class GameStateSummary:
     """Small observation payload for future strategy/LLM planning."""
 
@@ -28,10 +68,12 @@ class GameStateSummary:
     structures_ready: dict[str, int] = field(default_factory=dict)
     structures_pending: dict[str, int] = field(default_factory=dict)
     upgrades: tuple[str, ...] = ()
+    unit_observations: tuple[UnitObservation, ...] = ()
+    semantic_locations: dict[str, LocationSnapshot | None] = field(default_factory=dict)
 
 
 def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "minerals": summary.minerals,
         "vespene": summary.vespene,
         "supply": {
@@ -49,7 +91,51 @@ def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
         "known_enemy_units": summary.known_enemy_units,
         "game_time_seconds": summary.game_time_seconds,
     }
+    if summary.unit_observations:
+        result["unit_observations"] = [
+            _unit_observation_to_dict(observation)
+            for observation in summary.unit_observations
+        ]
+    if summary.semantic_locations:
+        result["semantic_locations"] = {
+            key: _location_snapshot_to_dict(value) if value is not None else None
+            for key, value in sorted(summary.semantic_locations.items())
+        }
+    return result
 
 
 def game_state_summary_to_json(summary: GameStateSummary) -> str:
     return json.dumps(game_state_summary_to_dict(summary), ensure_ascii=False, indent=2)
+
+
+def _unit_observation_to_dict(observation: UnitObservation) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "unit": observation.unit,
+        "alliance": observation.alliance,
+    }
+    optional_fields = (
+        "tag",
+        "x",
+        "y",
+        "health",
+        "health_max",
+        "energy",
+        "is_ready",
+        "is_flying",
+        "is_burrowed",
+        "is_loaded",
+        "is_idle",
+        "cargo_used",
+        "cargo_max",
+    )
+    for field_name in optional_fields:
+        value = getattr(observation, field_name)
+        if value is not None:
+            result[field_name] = value
+    if observation.orders:
+        result["orders"] = list(observation.orders)
+    return result
+
+
+def _location_snapshot_to_dict(location: LocationSnapshot) -> dict[str, Any]:
+    return {"x": location.x, "y": location.y, "resolved": location.resolved}

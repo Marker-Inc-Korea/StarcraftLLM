@@ -51,9 +51,33 @@ class LlmCommandSurfaceTest(unittest.TestCase):
     def test_function_schemas_cover_every_safe_llm_command(self):
         schemas = llm_command_function_schemas()
 
-        self.assertEqual(len(schemas), 18)
-        self.assertEqual({schema["name"] for schema in schemas}, set(LLM_COMMAND_FUNCTIONS))
-        self.assertEqual({command.key for command in COMMAND_SURFACE}, set(LLM_COMMAND_FUNCTIONS))
+        schema_names = {schema["name"] for schema in schemas}
+        self.assertEqual(schema_names, set(LLM_COMMAND_FUNCTIONS))
+        self.assertEqual(
+            {command.key for command in COMMAND_SURFACE}, set(LLM_COMMAND_FUNCTIONS)
+        )
+        self.assertTrue(
+            {
+                "move",
+                "attack_move",
+                "attack_enemy",
+                "patrol",
+                "hold_position",
+                "stop",
+                "rally",
+                "wait",
+                "wait_until",
+                "gather",
+                "distribute_workers",
+                "train",
+                "build",
+                "expand",
+                "build_addon",
+                "morph",
+                "research",
+                "repair",
+            }.issubset(schema_names)
+        )
         for schema in schemas:
             with self.subTest(command=schema["name"]):
                 self.assertEqual(schema["parameters"]["type"], "object")
@@ -63,8 +87,18 @@ class LlmCommandSurfaceTest(unittest.TestCase):
     def test_function_call_adapter_accepts_plain_and_openai_nested_calls(self):
         calls = [
             {"name": "expand", "arguments": json.dumps({"count": 2})},
-            {"function": {"name": "build_addon", "arguments": {"producer": "factory", "addon": "tech lab"}}},
-            {"function": {"name": "research", "arguments": json.dumps({"upgrade": "스팀팩"})}},
+            {
+                "function": {
+                    "name": "build_addon",
+                    "arguments": {"producer": "factory", "addon": "tech lab"},
+                }
+            },
+            {
+                "function": {
+                    "name": "research",
+                    "arguments": json.dumps({"upgrade": "스팀팩"}),
+                }
+            },
         ]
 
         plan = strategy_plan_from_function_calls(calls)
@@ -80,7 +114,9 @@ class LlmCommandSurfaceTest(unittest.TestCase):
 
     def test_function_call_adapter_rejects_unknown_function(self):
         with self.assertRaisesRegex(Exception, "unsupported command function"):
-            strategy_plan_from_function_calls([{"name": "lift_building", "arguments": {}}])
+            strategy_plan_from_function_calls(
+                [{"name": "lift_building", "arguments": {}}]
+            )
 
     def test_command_functions_match_schema_required_arguments(self):
         schemas = {schema["name"]: schema for schema in llm_command_function_schemas()}
@@ -89,7 +125,9 @@ class LlmCommandSurfaceTest(unittest.TestCase):
             required = set(schemas[name]["parameters"].get("required", []))
             required_parameters = {
                 parameter_name
-                for parameter_name, parameter in inspect.signature(function).parameters.items()
+                for parameter_name, parameter in inspect.signature(
+                    function
+                ).parameters.items()
                 if parameter.default is inspect.Parameter.empty
             }
             self.assertTrue(required_parameters.issubset(required), name)
@@ -116,9 +154,10 @@ class LlmCommandSurfaceTest(unittest.TestCase):
             "repair": {"target": "barracks"},
         }
 
-        for name, function in LLM_COMMAND_FUNCTIONS.items():
+        self.assertTrue(set(arguments).issubset(LLM_COMMAND_FUNCTIONS))
+        for name, payload in arguments.items():
             with self.subTest(command=name):
-                self.assertIsNotNone(function(**arguments[name]))
+                self.assertIsNotNone(LLM_COMMAND_FUNCTIONS[name](**payload))
 
     def test_repair_schema_exposes_only_mechanical_targets(self):
         schemas = {schema["name"]: schema for schema in llm_command_function_schemas()}
@@ -183,7 +222,9 @@ class CatalogAliasTest(unittest.TestCase):
             UnitTypeId.FACTORY,
             UnitTypeId.STARPORT,
         }
-        morph_types = {getattr(UnitTypeId, spec.enum_name) for spec in MORPH_SPECS.values()}
+        morph_types = {
+            getattr(UnitTypeId, spec.enum_name) for spec in MORPH_SPECS.values()
+        }
         trainable_terran = {
             unit_type
             for unit_type, producers in UNIT_TRAINED_FROM.items()
@@ -249,7 +290,9 @@ class StrategyRoundTripTest(unittest.TestCase):
         )
 
         self.assertEqual(json_plan, dsl_plan)
-        self.assertEqual(strategy_plan_from_dict(strategy_plan_to_dict(dsl_plan)), dsl_plan)
+        self.assertEqual(
+            strategy_plan_from_dict(strategy_plan_to_dict(dsl_plan)), dsl_plan
+        )
 
     def test_rejects_biological_repair_target(self):
         with self.assertRaisesRegex(Exception, "cannot repair biological target"):
@@ -288,7 +331,9 @@ class ValidatorCommandSurfaceTest(unittest.TestCase):
         plan = StrategyPlan(
             actions=(
                 BuildAddonCommand(addon="factory_tech_lab"),
-                WaitUntilCommand(condition="structure_ready", target="factory_tech_lab", at_least=1),
+                WaitUntilCommand(
+                    condition="structure_ready", target="factory_tech_lab", at_least=1
+                ),
                 ResearchUpgradeCommand(upgrade="infernal_pre_igniter"),
                 TrainUnitCommand(unit="siege_tank"),
             )
@@ -338,12 +383,18 @@ class ValidatorCommandSurfaceTest(unittest.TestCase):
                     minerals=100,
                     vespene=100,
                     structures={"commandcenter": 1, "engineering_bay": 1, "armory": 1},
-                    structures_ready={"commandcenter": 1, "engineering_bay": 1, "armory": 1},
+                    structures_ready={
+                        "commandcenter": 1,
+                        "engineering_bay": 1,
+                        "armory": 1,
+                    },
                 ),
             )
 
     def test_rejects_level_two_upgrade_until_previous_upgrade_completed(self):
-        plan = StrategyPlan(actions=(ResearchUpgradeCommand(upgrade="terran_infantry_weapons_level_2"),))
+        plan = StrategyPlan(
+            actions=(ResearchUpgradeCommand(upgrade="terran_infantry_weapons_level_2"),)
+        )
 
         with self.assertRaisesRegex(PlanValidationError, "level_1 completes"):
             validate_strategy_plan(
@@ -352,7 +403,11 @@ class ValidatorCommandSurfaceTest(unittest.TestCase):
                     minerals=200,
                     vespene=200,
                     structures={"commandcenter": 1, "engineering_bay": 1, "armory": 1},
-                    structures_ready={"commandcenter": 1, "engineering_bay": 1, "armory": 1},
+                    structures_ready={
+                        "commandcenter": 1,
+                        "engineering_bay": 1,
+                        "armory": 1,
+                    },
                 ),
             )
 
@@ -363,7 +418,9 @@ class ValidatorCommandSurfaceTest(unittest.TestCase):
             validate_strategy_plan(plan, _state())
 
     def test_existing_orbital_does_not_hide_a_free_command_center(self):
-        plan = StrategyPlan(actions=(MorphStructureCommand(building="orbital_command"),))
+        plan = StrategyPlan(
+            actions=(MorphStructureCommand(building="orbital_command"),)
+        )
 
         self.assertIs(
             validate_strategy_plan(
@@ -371,7 +428,11 @@ class ValidatorCommandSurfaceTest(unittest.TestCase):
                 _state(
                     minerals=200,
                     structures={"commandcenter": 1, "orbitalcommand": 1, "barracks": 1},
-                    structures_ready={"commandcenter": 1, "orbitalcommand": 1, "barracks": 1},
+                    structures_ready={
+                        "commandcenter": 1,
+                        "orbitalcommand": 1,
+                        "barracks": 1,
+                    },
                 ),
             ),
             plan,
@@ -396,7 +457,9 @@ def _enum_name(value):
 class FakeUnit:
     _next_tag = 1
 
-    def __init__(self, type_name="SCV", is_ready=True, damaged=False, has_techlab=False):
+    def __init__(
+        self, type_name="SCV", is_ready=True, damaged=False, has_techlab=False
+    ):
         self.type_id = FakeTypeId(type_name)
         self.tag = FakeUnit._next_tag
         FakeUnit._next_tag += 1
@@ -470,7 +533,13 @@ class FakeUnits(list):
         return self[0]
 
     def of_type(self, unit_types):
-        return FakeUnits([unit for unit in self if unit.type_id in unit_types or unit.type_id.name in unit_types])
+        return FakeUnits(
+            [
+                unit
+                for unit in self
+                if unit.type_id in unit_types or unit.type_id.name in unit_types
+            ]
+        )
 
     def closest_to(self, _unit):
         return self[0]
@@ -541,7 +610,9 @@ class NoExpansionFakeBotAI(AdvancedFakeBotAI):
 
 class Sc2ExecutorCommandSurfaceTest(unittest.TestCase):
     def test_executor_retries_when_no_expansion_location_is_available(self):
-        bot_class = create_move_unit_bot_class(NoExpansionFakeBotAI, lambda point: point)
+        bot_class = create_move_unit_bot_class(
+            NoExpansionFakeBotAI, lambda point: point
+        )
         bot = bot_class(StrategyPlan(actions=(ExpandCommand(),)), stop_after_seconds=0)
 
         async def run_once():
@@ -554,7 +625,9 @@ class Sc2ExecutorCommandSurfaceTest(unittest.TestCase):
         self.assertEqual(bot.expansion_orders, [])
         self.assertEqual(bot._current_action_index, 0)
 
-    def test_fake_executor_runs_expansion_addon_advanced_unit_research_distribution_repair_and_control(self):
+    def test_fake_executor_runs_expansion_addon_advanced_unit_research_distribution_repair_and_control(
+        self,
+    ):
         bot_class = create_move_unit_bot_class(AdvancedFakeBotAI, lambda point: point)
         plan = StrategyPlan(
             actions=(
@@ -615,7 +688,9 @@ def _state(
         townhalls=townhalls,
         army={},
         structures=structures,
-        structures_ready=structures_ready if structures_ready is not None else structures,
+        structures_ready=structures_ready
+        if structures_ready is not None
+        else structures,
         structures_pending={},
         upgrades=tuple(upgrades),
         known_enemy_units=0,

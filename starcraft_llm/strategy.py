@@ -6,32 +6,67 @@ from dataclasses import dataclass
 from typing import Any, Union
 
 from starcraft_llm.command_catalog import (
+    ABILITY_SPECS,
     ADDON_SPECS,
+    FLYING_STRUCTURE_ACTOR_KEYS,
+    LOCATION_SPECS,
+    MAX_SELECTION_COUNT,
+    MAX_STRUCTURE_ACTION_COUNT,
+    MAX_WORKER_ASSIGNMENT_COUNT,
     MORPH_SPECS,
     REPAIRABLE_TARGET_KEYS,
     STRUCTURE_SPECS,
+    TARGET_SELECTORS,
+    TRANSFORM_ABILITY_KEYS,
     UNIT_SPECS,
     UPGRADE_SPECS,
+    normalize_name,
+    resolve_ability,
     resolve_alias,
+    resolve_location,
+    resolve_selection_mode,
 )
 
 
 @dataclass(frozen=True)
+class LocationRef:
+    """LLM location target: either a semantic anchor or bounded coordinates."""
+
+    semantic: str | None = None
+    x: float | None = None
+    y: float | None = None
+
+
+@dataclass(frozen=True)
+class SelectionSpec:
+    """Bounded per-action actor selection; no persistent control groups."""
+
+    mode: str = "all"
+    count: int | None = None
+
+
+@dataclass(frozen=True)
 class MoveCommand:
-    """Move one logical unit group to a map point."""
+    """Move a bounded logical unit group to coordinates or a semantic point."""
 
     unit: str
-    x: float
-    y: float
+    x: float | None = None
+    y: float | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
 class AttackMoveCommand:
-    """Attack-move one logical unit group toward a map point."""
+    """Attack-move a bounded logical unit group toward a map point."""
 
     unit: str
-    x: float
-    y: float
+    x: float | None = None
+    y: float | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,6 +74,8 @@ class AttackEnemyCommand:
     """Attack the nearest currently visible enemy with one logical unit group."""
 
     unit: str = "marine"
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -83,11 +120,13 @@ class TrainUnitCommand:
 
 @dataclass(frozen=True)
 class BuildStructureCommand:
-    """Build one Terran structure at an executor-selected safe placement."""
+    """Build Terran structures at a semantic/coordinate or safe placement."""
 
     building: str
     worker: str = "worker"
     count: int = 1
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
 
 
 @dataclass(frozen=True)
@@ -139,8 +178,11 @@ class RallyCommand:
     """Set production structures' rally point."""
 
     building: str
-    x: float
-    y: float
+    x: float | None = None
+    y: float | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -148,8 +190,11 @@ class PatrolCommand:
     """Patrol a logical unit group toward a map point."""
 
     unit: str
-    x: float
-    y: float
+    x: float | None = None
+    y: float | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -157,6 +202,8 @@ class HoldPositionCommand:
     """Order a logical unit group to hold position."""
 
     unit: str
+    selection: SelectionSpec | None = None
+    queued: bool = False
 
 
 @dataclass(frozen=True)
@@ -164,6 +211,115 @@ class StopCommand:
     """Stop the current orders for a logical unit group."""
 
     unit: str
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class UseAbilityCommand:
+    """Use one allowlisted Terran ability with runtime availability gating."""
+
+    ability: str
+    actor: str | None = None
+    target_unit: str | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class ScanCommand:
+    location: LocationRef
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class CallDownMuleCommand:
+    location: LocationRef
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class SupplyDropCommand:
+    target_unit: str = "supply_depot"
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class TransformCommand:
+    ability: str
+    actor: str | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LiftCommand:
+    actor: str
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LandCommand:
+    actor: str
+    location: LocationRef
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LoadCommand:
+    actor: str
+    target_unit: str | None = None
+    count: int | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class UnloadCommand:
+    actor: str
+    target_unit: str | None = None
+    location: LocationRef | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class CancelCommand:
+    ability: str = "cancel_any"
+    actor: str | None = None
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class SalvageCommand:
+    actor: str
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class BuildNukeCommand:
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class LaunchNukeCommand:
+    location: LocationRef
+    selection: SelectionSpec | None = None
+    queued: bool = False
+
+
+@dataclass(frozen=True)
+class ReplanCommand:
+    reason: str = "requested"
 
 
 StrategyAction = Union[
@@ -186,6 +342,20 @@ StrategyAction = Union[
     MorphStructureCommand,
     ResearchUpgradeCommand,
     RepairCommand,
+    UseAbilityCommand,
+    ScanCommand,
+    CallDownMuleCommand,
+    SupplyDropCommand,
+    TransformCommand,
+    LiftCommand,
+    LandCommand,
+    LoadCommand,
+    UnloadCommand,
+    CancelCommand,
+    SalvageCommand,
+    BuildNukeCommand,
+    LaunchNukeCommand,
+    ReplanCommand,
 ]
 
 
@@ -284,12 +454,18 @@ def parse_strategy_plan(text: str, default_unit: str = "worker") -> StrategyPlan
     "then", for example: "move worker 35 42; wait 1; move worker 42 42".
     """
 
-    chunks = [chunk.strip() for chunk in _COMMAND_SPLIT_RE.split(text.strip()) if chunk.strip()]
+    chunks = [
+        chunk.strip()
+        for chunk in _COMMAND_SPLIT_RE.split(text.strip())
+        if chunk.strip()
+    ]
     if not chunks:
         raise StrategyParseError("strategy command is empty")
 
     return StrategyPlan(
-        actions=tuple(parse_strategy_action(chunk, default_unit=default_unit) for chunk in chunks)
+        actions=tuple(
+            parse_strategy_action(chunk, default_unit=default_unit) for chunk in chunks
+        )
     )
 
 
@@ -299,6 +475,16 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         raise StrategyParseError("strategy command is empty")
 
     verb = parts[0].lower()
+    if verb == "use" and len(parts) > 1 and parts[1].lower() == "ability":
+        return _parse_use_ability(["use_ability", *parts[2:]])
+    if verb == "build" and len(parts) > 1 and parts[1].lower() == "nuke":
+        return BuildNukeCommand()
+    if verb == "supply" and len(parts) > 1 and parts[1].lower() == "drop":
+        return SupplyDropCommand(
+            target_unit=normalize_target_unit(" ".join(parts[2:]) or "supply_depot")
+        )
+    if verb == "launch" and len(parts) > 1 and parts[1].lower() == "nuke":
+        return LaunchNukeCommand(location=_parse_location_words(parts[2:]))
     if verb == "move":
         return _parse_move(parts, default_unit=default_unit)
     if verb in {"attack", "attack_move", "attack-move"}:
@@ -331,10 +517,47 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         return _parse_research(parts)
     if verb == "repair":
         return _parse_repair(parts)
+    if verb in {"use_ability", "use-ability", "ability"}:
+        return _parse_use_ability(parts)
+    if verb == "scan":
+        return ScanCommand(location=_parse_location_words(parts[1:]))
+    if verb in {"mule", "call_down_mule", "call-down-mule"}:
+        return CallDownMuleCommand(location=_parse_location_words(parts[1:]))
+    if verb in {"supply_drop", "supply-drop"}:
+        return SupplyDropCommand(
+            target_unit=normalize_target_unit(" ".join(parts[1:]) or "supply_depot")
+        )
+    if verb in {"transform", "mode"}:
+        return _parse_transform(parts)
+    if verb == "lift":
+        if len(parts) < 2:
+            raise StrategyParseError("use: lift barracks")
+        return LiftCommand(actor=normalize_ability_actor(" ".join(parts[1:])))
+    if verb == "land":
+        return _parse_land(parts)
+    if verb == "load":
+        return _parse_load(parts)
+    if verb == "unload":
+        return _parse_unload(parts)
+    if verb == "cancel":
+        ability = normalize_cancel_ability(" ".join(parts[1:]) or "cancel_any")
+        return CancelCommand(ability=ability)
+    if verb == "salvage":
+        if len(parts) < 2:
+            raise StrategyParseError("use: salvage bunker")
+        return SalvageCommand(actor=normalize_ability_actor(" ".join(parts[1:])))
+    if verb in {"build_nuke", "build-nuke"}:
+        return BuildNukeCommand()
+    if verb in {"launch_nuke", "launch-nuke", "nuke"}:
+        return LaunchNukeCommand(location=_parse_location_words(parts[1:]))
+    if verb == "replan":
+        return ReplanCommand(reason=" ".join(parts[1:]) or "requested")
 
     raise StrategyParseError(
         "unsupported strategy command; use move, attack, patrol, hold, stop, rally, wait, "
-        "gather, distribute, train, build, expand, addon, morph, research, or repair"
+        "gather, distribute, train, build, expand, addon, morph, research, repair, use_ability, "
+        "scan, call_down_mule, supply_drop, transform, lift, land, load, unload, cancel, salvage, "
+        "build_nuke, launch_nuke, or replan"
     )
 
 
@@ -373,7 +596,9 @@ def strategy_plan_from_dict(payload: Any, default_unit: str = "worker") -> Strat
         actions_payload = payload
     elif isinstance(payload, dict):
         if "actions" not in payload:
-            raise StrategyParseError("strategy JSON object must contain an 'actions' field")
+            raise StrategyParseError(
+                "strategy JSON object must contain an 'actions' field"
+            )
         actions_payload = payload["actions"]
     else:
         raise StrategyParseError("strategy JSON must be an object or an actions array")
@@ -382,7 +607,10 @@ def strategy_plan_from_dict(payload: Any, default_unit: str = "worker") -> Strat
         raise StrategyParseError("strategy JSON 'actions' must be a non-empty array")
 
     return StrategyPlan(
-        actions=tuple(_action_from_dict(action, default_unit=default_unit) for action in actions_payload)
+        actions=tuple(
+            _action_from_dict(action, default_unit=default_unit)
+            for action in actions_payload
+        )
     )
 
 
@@ -408,16 +636,22 @@ def translate_strategy_intent(text: str, default_unit: str = "worker") -> Strate
     if any(keyword in normalized for keyword in ("정찰", "scout", "scouting")):
         return _route_plan(unit=unit, route=_SCOUT_ROUTE, wait_seconds=1)
 
-    if (
-        any(keyword in normalized for keyword in ("공격", "attack", "rush"))
-        and not any(keyword in normalized for keyword in ("업그레이드", "연구", "upgrade", "research"))
+    if any(keyword in normalized for keyword in ("공격", "attack", "rush")) and not any(
+        keyword in normalized for keyword in ("업그레이드", "연구", "upgrade", "research")
     ):
-        return StrategyPlan(actions=tuple(AttackMoveCommand(unit=unit, x=x, y=y) for x, y in _ATTACK_ROUTE))
+        return StrategyPlan(
+            actions=tuple(
+                AttackMoveCommand(unit=unit, x=x, y=y) for x, y in _ATTACK_ROUTE
+            )
+        )
 
     if any(keyword in normalized for keyword in ("집결", "전진", "rally", "advance")):
         return _route_plan(unit=unit, route=_RALLY_ROUTE, wait_seconds=0)
 
-    if any(keyword in normalized for keyword in ("일꾼 분배", "일꾼 재배치", "distribute workers", "rebalance workers")):
+    if any(
+        keyword in normalized
+        for keyword in ("일꾼 분배", "일꾼 재배치", "distribute workers", "rebalance workers")
+    ):
         return StrategyPlan(actions=(DistributeWorkersCommand(),))
 
     if any(keyword in normalized for keyword in ("채취", "캐", "gather", "harvest")):
@@ -425,7 +659,10 @@ def translate_strategy_intent(text: str, default_unit: str = "worker") -> Strate
             return StrategyPlan(actions=(GatherGasCommand(unit="worker"),))
         return StrategyPlan(actions=(GatherMineralsCommand(unit="worker"),))
 
-    if any(keyword in normalized for keyword in ("확장", "멀티", "expand", "expansion", "natural")):
+    if any(
+        keyword in normalized
+        for keyword in ("확장", "멀티", "expand", "expansion", "natural")
+    ):
         return StrategyPlan(actions=(ExpandCommand(),))
 
     if any(keyword in normalized for keyword in ("연구", "업그레이드", "research", "upgrade")):
@@ -433,7 +670,18 @@ def translate_strategy_intent(text: str, default_unit: str = "worker") -> Strate
         if upgrade:
             return StrategyPlan(actions=(ResearchUpgradeCommand(upgrade=upgrade),))
 
-    if any(keyword in normalized for keyword in ("기술실", "반응로", "tech lab", "techlab", "reactor", "addon", "add-on")):
+    if any(
+        keyword in normalized
+        for keyword in (
+            "기술실",
+            "반응로",
+            "tech lab",
+            "techlab",
+            "reactor",
+            "addon",
+            "add-on",
+        )
+    ):
         addon = _catalog_key_from_intent(normalized, ADDON_SPECS)
         if addon:
             return StrategyPlan(actions=(BuildAddonCommand(addon=addon),))
@@ -446,11 +694,18 @@ def translate_strategy_intent(text: str, default_unit: str = "worker") -> Strate
         return StrategyPlan(actions=(MorphStructureCommand(building=morph),))
 
     if any(keyword in normalized for keyword in ("수리", "repair", "fix")):
-        target = _catalog_key_from_intent(normalized, {**STRUCTURE_SPECS, **MORPH_SPECS, **UNIT_SPECS})
+        target = _catalog_key_from_intent(
+            normalized, {**STRUCTURE_SPECS, **MORPH_SPECS, **UNIT_SPECS}
+        )
         if target:
-            return StrategyPlan(actions=(RepairCommand(target="worker" if target == "scv" else target),))
+            return StrategyPlan(
+                actions=(RepairCommand(target="worker" if target == "scv" else target),)
+            )
 
-    if any(keyword in normalized for keyword in ("생산", "훈련", "뽑", "train", "make", "produce")):
+    if any(
+        keyword in normalized
+        for keyword in ("생산", "훈련", "뽑", "train", "make", "produce")
+    ):
         train_unit = _catalog_key_from_intent(normalized, UNIT_SPECS)
         if train_unit:
             return StrategyPlan(actions=(TrainUnitCommand(unit=train_unit),))
@@ -479,7 +734,9 @@ def _parse_move(parts: list[str], default_unit: str) -> MoveCommand:
     return MoveCommand(unit=unit, x=x, y=y)
 
 
-def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand | AttackEnemyCommand:
+def _parse_attack(
+    parts: list[str], default_unit: str
+) -> AttackMoveCommand | AttackEnemyCommand:
     if len(parts) >= 2 and parts[1].lower() == "move":
         parts = [parts[0], *parts[2:]]
 
@@ -497,7 +754,9 @@ def _parse_attack(parts: list[str], default_unit: str) -> AttackMoveCommand | At
         unit = normalize_unit(" ".join(parts[1:-2]))
         x_text, y_text = parts[-2:]
     else:
-        raise StrategyParseError("use: attack marine 55 45, attack move marine 55 45, or attack 55 45")
+        raise StrategyParseError(
+            "use: attack marine 55 45, attack move marine 55 45, or attack 55 45"
+        )
 
     x, y = _parse_coordinates(x_text, y_text)
     return AttackMoveCommand(unit=unit, x=x, y=y)
@@ -516,8 +775,14 @@ def _parse_patrol(parts: list[str], default_unit: str) -> PatrolCommand:
     return PatrolCommand(unit=unit, x=x, y=y)
 
 
-def _parse_unit_order(parts: list[str], command_type, default_unit: str) -> HoldPositionCommand | StopCommand:
-    unit = normalize_unit(" ".join(parts[1:])) if len(parts) > 1 else normalize_unit(default_unit)
+def _parse_unit_order(
+    parts: list[str], command_type, default_unit: str
+) -> HoldPositionCommand | StopCommand:
+    unit = (
+        normalize_unit(" ".join(parts[1:]))
+        if len(parts) > 1
+        else normalize_unit(default_unit)
+    )
     return command_type(unit=unit)
 
 
@@ -567,15 +832,23 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
 
     if metric in {"supply_left", "supply_used", "supply_cap", "supply"}:
         condition = metric
-        if metric == "supply" and len(parts) >= 2 and parts[1].lower() in {"left", "used", "cap"}:
+        if (
+            metric == "supply"
+            and len(parts) >= 2
+            and parts[1].lower() in {"left", "used", "cap"}
+        ):
             condition = f"supply_{parts[1].lower()}"
             value_parts = parts[2:]
         else:
             condition = "supply_left" if metric == "supply" else metric
             value_parts = parts[1:]
         if len(value_parts) != 1:
-            raise StrategyParseError("use: wait until supply left 1, supply used 20, or supply cap 31")
-        return WaitUntilCommand(condition=condition, at_least=_parse_at_least(value_parts[0]))
+            raise StrategyParseError(
+                "use: wait until supply left 1, supply used 20, or supply cap 31"
+            )
+        return WaitUntilCommand(
+            condition=condition, at_least=_parse_at_least(value_parts[0])
+        )
 
     if metric in {"structure", "building"}:
         return _parse_wait_until_structure(parts[1:])
@@ -592,7 +865,9 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
     if metric in {"townhall", "townhalls", "base", "bases"}:
         if len(parts) != 2:
             raise StrategyParseError("use: wait until townhalls 2")
-        return WaitUntilCommand(condition="townhall_count", at_least=_parse_at_least(parts[1]))
+        return WaitUntilCommand(
+            condition="townhall_count", at_least=_parse_at_least(parts[1])
+        )
 
     if metric in {"upgrade", "research"}:
         if len(parts) < 2:
@@ -611,7 +886,9 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
     if metric in {"time", "game_time", "seconds"}:
         if len(parts) != 2:
             raise StrategyParseError("use: wait until game_time 120")
-        return WaitUntilCommand(condition="game_time", at_least=_parse_at_least(parts[1]))
+        return WaitUntilCommand(
+            condition="game_time", at_least=_parse_at_least(parts[1])
+        )
 
     raise StrategyParseError(f"unsupported wait-until condition: {parts[0]}")
 
@@ -620,10 +897,23 @@ def _parse_wait_until_structure(parts: list[str]) -> WaitUntilCommand:
     if len(parts) < 2:
         raise StrategyParseError("use: wait until structure supply depot ready")
 
-    status_words = {"ready", "complete", "completed", "pending", "started", "count", "total"}
-    status_index = next((index for index, part in enumerate(parts) if part.lower() in status_words), None)
+    status_words = {
+        "ready",
+        "complete",
+        "completed",
+        "pending",
+        "started",
+        "count",
+        "total",
+    }
+    status_index = next(
+        (index for index, part in enumerate(parts) if part.lower() in status_words),
+        None,
+    )
     if status_index is None:
-        raise StrategyParseError("structure wait must end with ready, pending, started, count, or total")
+        raise StrategyParseError(
+            "structure wait must end with ready, pending, started, count, or total"
+        )
 
     building_text = " ".join(parts[:status_index])
     if not building_text:
@@ -642,13 +932,21 @@ def _parse_wait_until_structure(parts: list[str]) -> WaitUntilCommand:
     else:
         condition = "structure_count"
 
-    return WaitUntilCommand(condition=condition, target=normalize_structure_target(building_text), at_least=at_least)
+    return WaitUntilCommand(
+        condition=condition,
+        target=normalize_structure_target(building_text),
+        at_least=at_least,
+    )
 
 
-def _parse_gather(parts: list[str], default_unit: str) -> GatherMineralsCommand | GatherGasCommand:
+def _parse_gather(
+    parts: list[str], default_unit: str
+) -> GatherMineralsCommand | GatherGasCommand:
     workers = None
     if len(parts) > 2 and _looks_like_positive_int(parts[-1]):
-        workers = _parse_positive_int(parts[-1], "gather worker count")
+        workers = _parse_positive_int(
+            parts[-1], "gather worker count", MAX_WORKER_ASSIGNMENT_COUNT
+        )
         parts = parts[:-1]
 
     if len(parts) == 2:
@@ -678,7 +976,11 @@ def _parse_distribute_workers(parts: list[str]) -> DistributeWorkersCommand:
         remaining = remaining[1:]
     if len(remaining) > 1:
         raise StrategyParseError("use: distribute workers or distribute workers 2")
-    ratio = _parse_non_negative_number(remaining[0], "mineral-to-gas ratio") if remaining else 2.0
+    ratio = (
+        _parse_non_negative_number(remaining[0], "mineral-to-gas ratio")
+        if remaining
+        else 2.0
+    )
     if ratio > 20:
         raise StrategyParseError("mineral-to-gas ratio is too high")
     return DistributeWorkersCommand(mineral_to_gas_ratio=ratio)
@@ -691,19 +993,25 @@ def _parse_train(parts: list[str]) -> TrainUnitCommand:
     count = 1
     unit_parts = parts[1:]
     if len(unit_parts) > 1 and _looks_like_positive_int(unit_parts[-1]):
-        count = _parse_positive_int(unit_parts[-1], "train count")
+        count = _parse_positive_int(unit_parts[-1], "train count", MAX_SELECTION_COUNT)
         unit_parts = unit_parts[:-1]
-    return TrainUnitCommand(unit=normalize_train_unit(" ".join(unit_parts)), count=count)
+    return TrainUnitCommand(
+        unit=normalize_train_unit(" ".join(unit_parts)), count=count
+    )
 
 
 def _parse_build(parts: list[str]) -> BuildStructureCommand | BuildAddonCommand:
     if len(parts) < 2:
-        raise StrategyParseError("use: build supply depot, build barracks 2, or build refinery")
+        raise StrategyParseError(
+            "use: build supply depot, build barracks 2, or build refinery"
+        )
 
     count = 1
     building_parts = parts[1:]
     if len(building_parts) > 1 and _looks_like_positive_int(building_parts[-1]):
-        count = _parse_positive_int(building_parts[-1], "build count")
+        count = _parse_positive_int(
+            building_parts[-1], "build count", MAX_STRUCTURE_ACTION_COUNT
+        )
         building_parts = building_parts[:-1]
     target = " ".join(building_parts)
     try:
@@ -718,24 +1026,34 @@ def _parse_build(parts: list[str]) -> BuildStructureCommand | BuildAddonCommand:
 def _parse_expand(parts: list[str]) -> ExpandCommand:
     if len(parts) > 2:
         raise StrategyParseError("use: expand or expand 2")
-    count = _parse_positive_int(parts[1], "expand count") if len(parts) == 2 else 1
+    count = (
+        _parse_positive_int(parts[1], "expand count", MAX_STRUCTURE_ACTION_COUNT)
+        if len(parts) == 2
+        else 1
+    )
     return ExpandCommand(count=count)
 
 
 def _parse_addon(parts: list[str]) -> BuildAddonCommand:
     if len(parts) < 2:
-        raise StrategyParseError("use: addon barracks tech lab or addon factory reactor")
+        raise StrategyParseError(
+            "use: addon barracks tech lab or addon factory reactor"
+        )
     count = 1
     addon_parts = parts[1:]
     if len(addon_parts) > 1 and _looks_like_positive_int(addon_parts[-1]):
-        count = _parse_positive_int(addon_parts[-1], "add-on count")
+        count = _parse_positive_int(
+            addon_parts[-1], "add-on count", MAX_STRUCTURE_ACTION_COUNT
+        )
         addon_parts = addon_parts[:-1]
     return BuildAddonCommand(addon=normalize_addon(" ".join(addon_parts)), count=count)
 
 
 def _parse_morph(parts: list[str]) -> MorphStructureCommand:
     if len(parts) < 2:
-        raise StrategyParseError("use: morph orbital command or morph planetary fortress")
+        raise StrategyParseError(
+            "use: morph orbital command or morph planetary fortress"
+        )
     return MorphStructureCommand(building=normalize_morph(" ".join(parts[1:])))
 
 
@@ -751,9 +1069,139 @@ def _parse_repair(parts: list[str]) -> RepairCommand:
     workers = 1
     target_parts = parts[1:]
     if len(target_parts) > 1 and _looks_like_positive_int(target_parts[-1]):
-        workers = _parse_positive_int(target_parts[-1], "repair worker count")
+        workers = _parse_positive_int(
+            target_parts[-1], "repair worker count", MAX_WORKER_ASSIGNMENT_COUNT
+        )
         target_parts = target_parts[:-1]
-    return RepairCommand(target=normalize_repair_target(" ".join(target_parts)), workers=workers)
+    return RepairCommand(
+        target=normalize_repair_target(" ".join(target_parts)), workers=workers
+    )
+
+
+def _parse_use_ability(parts: list[str]) -> UseAbilityCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: use_ability stim_marine [actor] [location]")
+    if (
+        len(parts) >= 3
+        and normalize_name(parts[1]) == "stim"
+        and normalize_name(parts[2]) in {"marine", "marauder"}
+    ):
+        ability = normalize_ability("_".join(parts[1:3]))
+        rest_start = 3
+    else:
+        try:
+            ability = normalize_ability(parts[1])
+            rest_start = 2
+        except StrategyParseError:
+            if len(parts) < 3:
+                raise
+            ability = normalize_ability("_".join(parts[1:3]))
+            rest_start = 3
+    spec = ABILITY_SPECS[ability]
+    rest = [
+        part for part in parts[rest_start:] if part.lower() not in {"with", "count"}
+    ]
+    if len(rest) > 1 and _looks_like_positive_int(rest[-1]):
+        rest = rest[:-1]
+    actor = (
+        normalize_ability_actor(" ".join(rest))
+        if rest and spec.target_kind == "none"
+        else (spec.actors[0] if spec.actors and spec.actors[0] != "any" else None)
+    )
+    location = (
+        _parse_location_words(rest)
+        if spec.target_kind in {"point", "mineral"}
+        else None
+    )
+    target_unit = (
+        normalize_target_unit(" ".join(rest))
+        if rest and spec.target_kind == "unit"
+        else None
+    )
+    return UseAbilityCommand(
+        ability=ability, actor=actor, target_unit=target_unit, location=location
+    )
+
+
+def _parse_location_words(words: list[str]) -> LocationRef:
+    if not words:
+        raise StrategyParseError("location is required")
+    if len(words) == 2:
+        try:
+            x, y = _parse_coordinates(words[0], words[1])
+            return _normalize_location_ref(LocationRef(x=x, y=y))
+        except StrategyParseError:
+            pass
+    return _normalize_location_ref(
+        LocationRef(semantic=normalize_location(" ".join(words)))
+    )
+
+
+def _parse_transform(parts: list[str]) -> TransformCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: transform siege_mode")
+    ability = normalize_ability(parts[-1])
+    if not _ability_in_family(ability, _TRANSFORM_ABILITIES):
+        raise StrategyParseError(f"unsupported transform ability: {ability}")
+    actor_text = " ".join(parts[1:-1])
+    spec = ABILITY_SPECS[ability]
+    actor = (
+        normalize_ability_actor(actor_text)
+        if actor_text
+        else (spec.actors[0] if spec.actors and spec.actors[0] != "any" else None)
+    )
+    return TransformCommand(ability=ability, actor=actor)
+
+
+def _parse_land(parts: list[str]) -> LandCommand:
+    if len(parts) < 3:
+        raise StrategyParseError("use: land barracks proxy or land barracks 55 45")
+    actor = normalize_ability_actor(parts[1])
+    return LandCommand(actor=actor, location=_parse_location_words(parts[2:]))
+
+
+def _parse_load(parts: list[str]) -> LoadCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: load medivac marine or load command_center")
+    actor = normalize_ability_actor(parts[1])
+    if len(parts) == 2:
+        if actor not in {"command_center", "orbital_command"}:
+            raise StrategyParseError(
+                "medivac and bunker load commands require a target unit"
+            )
+        return LoadCommand(actor=actor)
+    rest = parts[2:]
+    count = None
+    if len(rest) > 1 and _looks_like_positive_int(rest[-1]):
+        count = _parse_positive_int(rest[-1], "load count", MAX_SELECTION_COUNT)
+        rest = rest[:-1]
+    return LoadCommand(
+        actor=actor,
+        target_unit=normalize_target_unit(" ".join(rest)),
+        count=count,
+    )
+
+
+def _parse_unload(parts: list[str]) -> UnloadCommand:
+    if len(parts) < 2:
+        raise StrategyParseError("use: unload medivac [location|unit]")
+    actor = normalize_ability_actor(parts[1])
+    rest = parts[2:]
+    if not rest:
+        return UnloadCommand(actor=actor)
+    try:
+        return UnloadCommand(actor=actor, location=_parse_location_words(rest))
+    except StrategyParseError:
+        return UnloadCommand(
+            actor=actor, target_unit=normalize_target_unit(" ".join(rest))
+        )
+
+
+_TRANSFORM_ABILITIES = frozenset(TRANSFORM_ABILITY_KEYS)
+
+
+def _ability_in_family(ability: str, family: set[str] | frozenset[str]) -> bool:
+    return ability in family
 
 
 def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
@@ -763,40 +1211,78 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
     action_type = str(payload.get("type", "")).strip().lower()
     if action_type == "move":
         unit = normalize_unit(str(payload.get("unit", default_unit)))
-        x = _required_number(payload, "x")
-        y = _required_number(payload, "y")
-        return MoveCommand(unit=unit, x=x, y=y)
+        x, y, location = _point_target_from_payload(payload)
+        return MoveCommand(
+            unit=unit,
+            x=x,
+            y=y,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
 
     if action_type in {"attack", "attack_move", "attack-move"}:
         target = str(payload.get("target", "")).strip().lower()
         if target in {"enemy", "nearest_enemy", "nearest enemy"}:
-            return AttackEnemyCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
+            return AttackEnemyCommand(
+                unit=normalize_unit(str(payload.get("unit", default_unit))),
+                selection=_selection_from_payload(payload),
+                queued=_bool_from_payload(payload, "queued", default=False),
+            )
         unit = normalize_unit(str(payload.get("unit", default_unit)))
-        x = _required_number(payload, "x")
-        y = _required_number(payload, "y")
-        return AttackMoveCommand(unit=unit, x=x, y=y)
+        x, y, location = _point_target_from_payload(payload)
+        return AttackMoveCommand(
+            unit=unit,
+            x=x,
+            y=y,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
 
     if action_type in {"attack_enemy", "attack-enemy"}:
-        return AttackEnemyCommand(unit=normalize_unit(str(payload.get("unit", "marine"))))
+        return AttackEnemyCommand(
+            unit=normalize_unit(str(payload.get("unit", "marine"))),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
 
     if action_type == "patrol":
+        x, y, location = _point_target_from_payload(payload)
         return PatrolCommand(
             unit=normalize_unit(str(payload.get("unit", default_unit))),
-            x=_required_number(payload, "x"),
-            y=_required_number(payload, "y"),
+            x=x,
+            y=y,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
         )
 
     if action_type in {"hold", "hold_position", "hold-position"}:
-        return HoldPositionCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
+        return HoldPositionCommand(
+            unit=normalize_unit(str(payload.get("unit", default_unit))),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
 
     if action_type == "stop":
-        return StopCommand(unit=normalize_unit(str(payload.get("unit", default_unit))))
+        return StopCommand(
+            unit=normalize_unit(str(payload.get("unit", default_unit))),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
 
     if action_type in {"rally", "set_rally", "set-rally"}:
+        x, y, location = _point_target_from_payload(payload)
         return RallyCommand(
-            building=normalize_production_structure(str(payload.get("building", payload.get("producer", "")))),
-            x=_required_number(payload, "x"),
-            y=_required_number(payload, "y"),
+            building=normalize_production_structure(
+                str(payload.get("building", payload.get("producer", "")))
+            ),
+            x=x,
+            y=y,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
         )
 
     if action_type == "wait":
@@ -816,14 +1302,20 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         if resource in {"mineral", "minerals", "미네랄"}:
             return GatherMineralsCommand(
                 unit=unit,
-                workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+                workers=_optional_positive_int_from_payload(
+                    payload, ("workers", "count"), MAX_WORKER_ASSIGNMENT_COUNT
+                ),
             )
         if resource in {"gas", "vespene", "vespene_gas", "가스", "베스핀"}:
             return GatherGasCommand(
                 unit=unit,
-                workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+                workers=_optional_positive_int_from_payload(
+                    payload, ("workers", "count"), MAX_WORKER_ASSIGNMENT_COUNT
+                ),
             )
-        raise StrategyParseError("only mineral and gas gathering are supported in this MVP")
+        raise StrategyParseError(
+            "only mineral and gas gathering are supported in this MVP"
+        )
 
     if action_type in {"gather_gas", "gather-gas", "gather_vespene"}:
         unit = normalize_unit(str(payload.get("unit", default_unit)))
@@ -831,7 +1323,9 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             raise StrategyParseError("only workers can gather gas in this MVP")
         return GatherGasCommand(
             unit=unit,
-            workers=_optional_positive_int_from_payload(payload, ("workers", "count")),
+            workers=_optional_positive_int_from_payload(
+                payload, ("workers", "count"), MAX_WORKER_ASSIGNMENT_COUNT
+            ),
         )
 
     if action_type in {"distribute_workers", "distribute-workers", "distribute"}:
@@ -847,18 +1341,28 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
     if action_type == "train":
         return TrainUnitCommand(
             unit=normalize_train_unit(str(payload.get("unit", ""))),
-            count=_positive_int_from_payload(payload, "count", default=1),
+            count=_positive_int_from_payload(
+                payload, "count", default=1, max_count=MAX_SELECTION_COUNT
+            ),
         )
 
     if action_type == "build":
         return BuildStructureCommand(
             building=normalize_building(str(payload.get("building", ""))),
             worker=normalize_unit(str(payload.get("worker", "worker"))),
-            count=_positive_int_from_payload(payload, "count", default=1),
+            count=_positive_int_from_payload(
+                payload, "count", default=1, max_count=MAX_STRUCTURE_ACTION_COUNT
+            ),
+            location=_location_from_payload(payload, required=False),
+            selection=_selection_from_payload(payload),
         )
 
     if action_type == "expand":
-        return ExpandCommand(count=_positive_int_from_payload(payload, "count", default=1))
+        return ExpandCommand(
+            count=_positive_int_from_payload(
+                payload, "count", default=1, max_count=MAX_STRUCTURE_ACTION_COUNT
+            )
+        )
 
     if action_type in {"build_addon", "build-addon", "addon"}:
         addon_value = str(payload.get("addon", ""))
@@ -870,41 +1374,284 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
                 addon_value = f"{producer_value} {addon_value}"
         return BuildAddonCommand(
             addon=normalize_addon(addon_value),
-            count=_positive_int_from_payload(payload, "count", default=1),
+            count=_positive_int_from_payload(
+                payload, "count", default=1, max_count=MAX_STRUCTURE_ACTION_COUNT
+            ),
         )
 
     if action_type == "morph":
         return MorphStructureCommand(
-            building=normalize_morph(str(payload.get("building", payload.get("target", ""))))
+            building=normalize_morph(
+                str(payload.get("building", payload.get("target", "")))
+            )
         )
 
     if action_type in {"research", "upgrade"}:
-        return ResearchUpgradeCommand(upgrade=normalize_upgrade(str(payload.get("upgrade", ""))))
+        return ResearchUpgradeCommand(
+            upgrade=normalize_upgrade(str(payload.get("upgrade", "")))
+        )
 
     if action_type == "repair":
         return RepairCommand(
             target=normalize_repair_target(str(payload.get("target", ""))),
-            workers=_positive_int_from_payload(payload, "workers", default=1),
+            workers=_positive_int_from_payload(
+                payload, "workers", default=1, max_count=MAX_WORKER_ASSIGNMENT_COUNT
+            ),
         )
+
+    if action_type in {"use_ability", "use-ability", "ability"}:
+        ability = normalize_ability(str(payload.get("ability", "")))
+        spec = ABILITY_SPECS[ability]
+        location = (
+            _location_from_payload(payload, required=ability == "scan")
+            if spec.target_kind in {"point", "mineral"}
+            else None
+        )
+        target_unit = (
+            _target_unit_from_payload(payload)
+            if spec.target_kind == "unit"
+            or (
+                spec.target_kind == "none"
+                and ("target" in payload or "target_unit" in payload)
+            )
+            else None
+        )
+        if spec.target_kind == "none" and (
+            "location" in payload or "x" in payload or "y" in payload
+        ):
+            raise StrategyParseError(f"ability {ability} does not take a point target")
+        if spec.target_kind in {"point", "mineral"} and "target_unit" in payload:
+            raise StrategyParseError(f"ability {ability} requires a location target")
+        if spec.target_kind == "unit" and any(
+            key in payload for key in ("location", "x", "y")
+        ):
+            raise StrategyParseError(f"ability {ability} requires a unit target")
+        return UseAbilityCommand(
+            ability=ability,
+            actor=_optional_actor_from_payload(payload),
+            target_unit=target_unit,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "scan":
+        location = _location_from_payload(payload, required=True)
+        if location is None:
+            raise StrategyParseError("scan requires a location or x/y coordinates")
+        return ScanCommand(
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type in {"call_down_mule", "call-down-mule", "mule"}:
+        location = _location_from_payload(payload, required=True)
+        if location is None:
+            raise StrategyParseError(
+                "call_down_mule requires a location or x/y coordinates"
+            )
+        return CallDownMuleCommand(
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type in {"supply_drop", "supply-drop"}:
+        return SupplyDropCommand(
+            target_unit=normalize_target_unit(
+                str(payload.get("target_unit", payload.get("target", "supply_depot")))
+            ),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type in {"transform", "mode"}:
+        ability = normalize_ability(
+            str(payload.get("ability", payload.get("mode", "")))
+        )
+        if ability not in _TRANSFORM_ABILITIES:
+            raise StrategyParseError(f"unsupported transform ability: {ability}")
+        return TransformCommand(
+            ability=ability,
+            actor=_optional_actor_from_payload(payload)
+            or _default_actor_for_ability(ability),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "lift":
+        actor = normalize_ability_actor(
+            str(payload.get("actor", payload.get("building", "")))
+        )
+        return LiftCommand(
+            actor=actor,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "land":
+        actor = normalize_ability_actor(
+            str(payload.get("actor", payload.get("building", "")))
+        )
+        location = _location_from_payload(payload, required=True)
+        if location is None:
+            raise StrategyParseError("land requires a location or x/y coordinates")
+        return LandCommand(
+            actor=actor,
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "load":
+        actor = normalize_ability_actor(
+            str(payload.get("actor", payload.get("transport", "")))
+        )
+        target_value = payload.get(
+            "target_unit", payload.get("unit", payload.get("target"))
+        )
+        if target_value is None and actor not in {"command_center", "orbital_command"}:
+            raise StrategyParseError(
+                "medivac and bunker load commands require target_unit"
+            )
+        return LoadCommand(
+            actor=actor,
+            target_unit=(
+                normalize_target_unit(str(target_value))
+                if target_value is not None
+                else None
+            ),
+            count=_optional_positive_int_from_payload(
+                payload, ("count",), MAX_SELECTION_COUNT
+            ),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "unload":
+        return UnloadCommand(
+            actor=normalize_ability_actor(
+                str(payload.get("actor", payload.get("transport", "")))
+            ),
+            target_unit=normalize_target_unit(
+                str(payload.get("target_unit", payload.get("unit", "")))
+            )
+            if payload.get("target_unit", payload.get("unit"))
+            else None,
+            location=_location_from_payload(payload, required=False),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "cancel":
+        ability = normalize_cancel_ability(
+            str(
+                payload.get(
+                    "ability",
+                    payload.get("cancel", payload.get("target", "cancel_any")),
+                )
+            )
+        )
+        return CancelCommand(
+            ability=ability,
+            actor=_optional_actor_from_payload(payload),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "salvage":
+        return SalvageCommand(
+            actor=normalize_ability_actor(
+                str(
+                    payload.get(
+                        "actor", payload.get("building", payload.get("target", ""))
+                    )
+                )
+            ),
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type in {"build_nuke", "build-nuke"}:
+        return BuildNukeCommand(
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type in {"launch_nuke", "launch-nuke"}:
+        location = _location_from_payload(payload, required=True)
+        if location is None:
+            raise StrategyParseError(
+                "launch_nuke requires a location or x/y coordinates"
+            )
+        return LaunchNukeCommand(
+            location=location,
+            selection=_selection_from_payload(payload),
+            queued=_bool_from_payload(payload, "queued", default=False),
+        )
+
+    if action_type == "replan":
+        return ReplanCommand(reason=str(payload.get("reason", "requested")))
 
     raise StrategyParseError(f"unsupported JSON action type: {action_type!r}")
 
 
 def _action_to_dict(action: StrategyAction) -> dict[str, object]:
     if isinstance(action, MoveCommand):
-        return {"type": "move", "unit": action.unit, "x": action.x, "y": action.y}
+        return _point_command_payload(
+            "move",
+            action.unit,
+            action.x,
+            action.y,
+            action.location,
+            action.selection,
+            action.queued,
+        )
     if isinstance(action, AttackMoveCommand):
-        return {"type": "attack", "unit": action.unit, "x": action.x, "y": action.y}
+        return _point_command_payload(
+            "attack",
+            action.unit,
+            action.x,
+            action.y,
+            action.location,
+            action.selection,
+            action.queued,
+        )
     if isinstance(action, AttackEnemyCommand):
-        return {"type": "attack_enemy", "unit": action.unit}
+        return _unit_command_payload(
+            "attack_enemy", action.unit, action.selection, action.queued
+        )
     if isinstance(action, PatrolCommand):
-        return {"type": "patrol", "unit": action.unit, "x": action.x, "y": action.y}
+        return _point_command_payload(
+            "patrol",
+            action.unit,
+            action.x,
+            action.y,
+            action.location,
+            action.selection,
+            action.queued,
+        )
     if isinstance(action, HoldPositionCommand):
-        return {"type": "hold", "unit": action.unit}
+        return _unit_command_payload(
+            "hold", action.unit, action.selection, action.queued
+        )
     if isinstance(action, StopCommand):
-        return {"type": "stop", "unit": action.unit}
+        return _unit_command_payload(
+            "stop", action.unit, action.selection, action.queued
+        )
     if isinstance(action, RallyCommand):
-        return {"type": "rally", "building": action.building, "x": action.x, "y": action.y}
+        payload = _point_command_payload(
+            "rally",
+            None,
+            action.x,
+            action.y,
+            action.location,
+            action.selection,
+            action.queued,
+        )
+        payload["building"] = action.building
+        return payload
     if isinstance(action, WaitCommand):
         return {"type": "wait", "seconds": action.seconds}
     if isinstance(action, WaitUntilCommand):
@@ -935,7 +1682,10 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
             gather_gas_payload["workers"] = action.workers
         return gather_gas_payload
     if isinstance(action, DistributeWorkersCommand):
-        return {"type": "distribute_workers", "mineral_to_gas_ratio": action.mineral_to_gas_ratio}
+        return {
+            "type": "distribute_workers",
+            "mineral_to_gas_ratio": action.mineral_to_gas_ratio,
+        }
     if isinstance(action, TrainUnitCommand):
         train_payload: dict[str, object] = {"type": "train", "unit": action.unit}
         if action.count != 1:
@@ -949,6 +1699,9 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         }
         if action.count != 1:
             build_payload["count"] = action.count
+        if action.location is not None:
+            build_payload.update(_location_to_payload(action.location))
+        _add_selection_and_queue(build_payload, action.selection, False)
         return build_payload
     if isinstance(action, ExpandCommand):
         expand_payload: dict[str, object] = {"type": "expand"}
@@ -956,7 +1709,10 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
             expand_payload["count"] = action.count
         return expand_payload
     if isinstance(action, BuildAddonCommand):
-        addon_payload: dict[str, object] = {"type": "build_addon", "addon": action.addon}
+        addon_payload: dict[str, object] = {
+            "type": "build_addon",
+            "addon": action.addon,
+        }
         if action.count != 1:
             addon_payload["count"] = action.count
         return addon_payload
@@ -966,7 +1722,303 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         return {"type": "research", "upgrade": action.upgrade}
     if isinstance(action, RepairCommand):
         return {"type": "repair", "target": action.target, "workers": action.workers}
+    if isinstance(action, UseAbilityCommand):
+        payload = _ability_payload(
+            "use_ability",
+            action.ability,
+            action.actor,
+            None,
+            action.location,
+            action.selection,
+            action.queued,
+        )
+        if action.target_unit is not None:
+            payload["target"] = action.target_unit
+        if (
+            not action.queued
+            and action.location is not None
+            and action.location.x is not None
+        ):
+            payload["queued"] = False
+        return payload
+    if isinstance(action, ScanCommand):
+        return _ability_payload(
+            "scan", None, None, None, action.location, action.selection, action.queued
+        )
+    if isinstance(action, CallDownMuleCommand):
+        return _ability_payload(
+            "call_down_mule",
+            None,
+            None,
+            None,
+            action.location,
+            action.selection,
+            action.queued,
+        )
+    if isinstance(action, SupplyDropCommand):
+        payload = _ability_payload(
+            "supply_drop", None, None, None, None, action.selection, action.queued
+        )
+        payload["target"] = action.target_unit
+        return payload
+    if isinstance(action, TransformCommand):
+        payload = _ability_payload(
+            "transform", None, action.actor, None, None, action.selection, action.queued
+        )
+        payload["mode"] = _public_mode_for_ability(action.ability)
+        return payload
+    if isinstance(action, LiftCommand):
+        payload = _ability_payload(
+            "lift", None, None, None, None, action.selection, action.queued
+        )
+        payload["building"] = action.actor
+        return payload
+    if isinstance(action, LandCommand):
+        payload = _ability_payload(
+            "land", None, None, None, action.location, action.selection, action.queued
+        )
+        payload["building"] = action.actor
+        return payload
+    if isinstance(action, LoadCommand):
+        payload = _ability_payload(
+            "load", None, None, None, None, action.selection, action.queued
+        )
+        payload["transport"] = action.actor
+        if action.target_unit is not None:
+            payload["unit"] = action.target_unit
+        if action.count is not None:
+            payload["count"] = action.count
+        return payload
+    if isinstance(action, UnloadCommand):
+        payload = _ability_payload(
+            "unload", None, None, None, action.location, action.selection, action.queued
+        )
+        payload["transport"] = action.actor
+        if action.target_unit is not None:
+            payload["unit"] = action.target_unit
+        return payload
+    if isinstance(action, CancelCommand):
+        payload = _ability_payload(
+            "cancel", None, action.actor, None, None, action.selection, action.queued
+        )
+        payload["target"] = action.ability.removeprefix("cancel_")
+        return payload
+    if isinstance(action, SalvageCommand):
+        payload = _ability_payload(
+            "salvage", None, None, None, None, action.selection, action.queued
+        )
+        payload["target"] = action.actor
+        return payload
+    if isinstance(action, BuildNukeCommand):
+        return _ability_payload(
+            "build_nuke", None, None, None, None, action.selection, action.queued
+        )
+    if isinstance(action, LaunchNukeCommand):
+        return _ability_payload(
+            "launch_nuke",
+            None,
+            None,
+            None,
+            action.location,
+            action.selection,
+            action.queued,
+        )
+    if isinstance(action, ReplanCommand):
+        return {"type": "replan", "reason": action.reason}
     raise TypeError(f"unsupported strategy action: {action!r}")
+
+
+def _point_command_payload(
+    action_type: str,
+    unit: str | None,
+    x: float | None,
+    y: float | None,
+    location: LocationRef | None,
+    selection: SelectionSpec | None,
+    queued: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"type": action_type}
+    if unit is not None:
+        payload["unit"] = unit
+    if location is not None:
+        payload.update(_location_to_payload(location))
+    elif x is not None and y is not None:
+        payload.update({"x": x, "y": y})
+    else:
+        raise TypeError(
+            f"{action_type} requires a semantic location or x/y coordinates"
+        )
+    _add_selection_and_queue(payload, selection, queued)
+    return payload
+
+
+def _unit_command_payload(
+    action_type: str,
+    unit: str,
+    selection: SelectionSpec | None,
+    queued: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"type": action_type, "unit": unit}
+    _add_selection_and_queue(payload, selection, queued)
+    return payload
+
+
+def _add_selection_and_queue(
+    payload: dict[str, object], selection: SelectionSpec | None, queued: bool
+) -> None:
+    if selection is not None:
+        selection_payload: dict[str, object] = {"mode": selection.mode}
+        if selection.count is not None:
+            selection_payload["count"] = selection.count
+        payload["selection"] = selection_payload
+    if queued:
+        payload["queued"] = True
+
+
+def _public_mode_for_ability(ability: str) -> str:
+    return {
+        "siege_mode": "siege",
+        "unsiege_mode": "unsiege",
+        "morph_hellbat": "hellbat",
+        "morph_hellion": "hellion",
+        "thor_high_impact_mode": "high_impact",
+        "thor_explosive_mode": "explosive",
+        "viking_assault_mode": "assault",
+        "viking_fighter_mode": "fighter",
+        "liberator_ag_mode": "ag",
+        "liberator_aa_mode": "aa",
+    }.get(ability, ability)
+
+
+def _ability_payload(
+    action_type: str,
+    ability: str | None,
+    actor: str | None,
+    target_unit: str | None,
+    location: LocationRef | None,
+    selection: SelectionSpec | None,
+    queued: bool,
+) -> dict[str, object]:
+    payload: dict[str, object] = {"type": action_type}
+    if ability is not None:
+        payload["ability"] = ability
+    if actor is not None:
+        payload["actor"] = actor
+    if target_unit is not None:
+        payload["target_unit"] = target_unit
+    if location is not None:
+        payload.update(_location_to_payload(location))
+    if selection is not None:
+        selection_payload: dict[str, object] = {"mode": selection.mode}
+        if selection.count is not None:
+            selection_payload["count"] = selection.count
+        payload["selection"] = selection_payload
+    if queued:
+        payload["queued"] = queued
+    return payload
+
+
+def _location_to_payload(location: LocationRef) -> dict[str, object]:
+    if location.semantic is not None:
+        return {"location": location.semantic}
+    if location.x is not None and location.y is not None:
+        return {"x": location.x, "y": location.y}
+    raise TypeError(f"invalid location ref: {location!r}")
+
+
+def _location_from_payload(
+    payload: dict[str, Any], required: bool
+) -> LocationRef | None:
+    location_value = payload.get("location", payload.get("semantic_location"))
+    has_semantic_location = location_value is not None and bool(
+        str(location_value).strip()
+    )
+    has_coordinates = "x" in payload or "y" in payload
+    if has_semantic_location and has_coordinates:
+        raise StrategyParseError(
+            "location target must use either a semantic location or x/y coordinates, not both"
+        )
+    if has_semantic_location:
+        return _normalize_location_ref(
+            LocationRef(semantic=normalize_location(str(location_value)))
+        )
+    if has_coordinates:
+        return _normalize_location_ref(
+            LocationRef(
+                x=_required_number(payload, "x"), y=_required_number(payload, "y")
+            )
+        )
+    target = payload.get("target")
+    if isinstance(target, str) and target and target in LOCATION_SPECS:
+        return _normalize_location_ref(LocationRef(semantic=normalize_location(target)))
+    if required:
+        raise StrategyParseError(
+            "strategy JSON action requires a semantic location or x/y coordinates"
+        )
+    return None
+
+
+def _normalize_location_ref(location: LocationRef) -> LocationRef:
+    if location.semantic is not None:
+        return LocationRef(semantic=normalize_location(location.semantic))
+    if location.x is None or location.y is None:
+        raise StrategyParseError(
+            "location requires either a semantic key or both x and y"
+        )
+    if not 0 <= location.x <= 256 or not 0 <= location.y <= 256:
+        raise StrategyParseError("location coordinates must be between 0 and 256")
+    return location
+
+
+def _selection_from_payload(payload: dict[str, Any]) -> SelectionSpec | None:
+    raw = payload.get("selection")
+    if raw is None:
+        if "selection_mode" in payload or "selection_count" in payload:
+            raw = {
+                "mode": payload.get("selection_mode", "all"),
+                "count": payload.get("selection_count"),
+            }
+        else:
+            return None
+    if not isinstance(raw, dict):
+        raise StrategyParseError("selection must be an object")
+    mode = normalize_selection_mode(str(raw.get("mode", "all")))
+    count = None
+    if raw.get("count") is not None:
+        count = _positive_int_unbounded_from_payload(raw, "count")
+        if count > MAX_SELECTION_COUNT:
+            raise StrategyParseError(
+                f"selection count must not exceed {MAX_SELECTION_COUNT}"
+            )
+    return SelectionSpec(mode=mode, count=count)
+
+
+def _bool_from_payload(payload: dict[str, Any], key: str, default: bool) -> bool:
+    if key not in payload:
+        return default
+    value = payload[key]
+    if isinstance(value, bool):
+        return value
+    raise StrategyParseError(f"strategy JSON field must be boolean: {key}")
+
+
+def _target_unit_from_payload(payload: dict[str, Any]) -> str:
+    value = payload.get("target_unit", payload.get("unit", payload.get("target", "")))
+    text = str(value).strip()
+    if text and normalize_name(text) in LOCATION_SPECS:
+        return normalize_location(text)
+    return normalize_target_unit(text)
+
+
+def _optional_actor_from_payload(payload: dict[str, Any]) -> str | None:
+    value = payload.get("actor", payload.get("source", payload.get("building", "")))
+    text = str(value).strip()
+    return normalize_ability_actor(text) if text else None
+
+
+def _default_actor_for_ability(ability: str) -> str | None:
+    spec = ABILITY_SPECS[ability]
+    return spec.actors[0] if spec.actors and spec.actors[0] != "any" else None
 
 
 def _parse_coordinates(x_text: str, y_text: str) -> tuple[float, float]:
@@ -976,9 +2028,24 @@ def _parse_coordinates(x_text: str, y_text: str) -> tuple[float, float]:
         raise StrategyParseError("coordinates must be numbers") from exc
 
 
+def _point_target_from_payload(
+    payload: dict[str, Any],
+) -> tuple[float | None, float | None, LocationRef | None]:
+    location = _location_from_payload(payload, required=True)
+    if location is None:
+        raise StrategyParseError(
+            "strategy JSON action requires a semantic location or x/y coordinates"
+        )
+    if location.semantic is not None:
+        return None, None, location
+    return location.x, location.y, None
+
+
 def _required_number(payload: dict[str, Any], key: str) -> float:
     if key not in payload:
-        raise StrategyParseError(f"strategy JSON action is missing required field: {key}")
+        raise StrategyParseError(
+            f"strategy JSON action is missing required field: {key}"
+        )
     value = payload[key]
     if isinstance(value, bool):
         raise StrategyParseError(f"strategy JSON field must be numeric: {key}")
@@ -988,13 +2055,17 @@ def _required_number(payload: dict[str, Any], key: str) -> float:
         raise StrategyParseError(f"strategy JSON field must be numeric: {key}") from exc
 
 
-def _optional_number(payload: dict[str, Any], keys: tuple[str, ...], default: float | None = None) -> float:
+def _optional_number(
+    payload: dict[str, Any], keys: tuple[str, ...], default: float | None = None
+) -> float:
     for key in keys:
         if key in payload:
             return _required_number(payload, key)
     if default is not None:
         return default
-    raise StrategyParseError(f"strategy JSON action is missing one of required fields: {', '.join(keys)}")
+    raise StrategyParseError(
+        f"strategy JSON action is missing one of required fields: {', '.join(keys)}"
+    )
 
 
 def _parse_at_least(value: str) -> float:
@@ -1007,15 +2078,15 @@ def _parse_at_least(value: str) -> float:
     return at_least
 
 
-def _parse_positive_int(value: str, field_name: str) -> int:
+def _parse_positive_int(value: str, field_name: str, max_count: int) -> int:
     try:
         parsed = int(value)
     except ValueError as exc:
         raise StrategyParseError(f"{field_name} must be an integer") from exc
     if parsed < 1:
         raise StrategyParseError(f"{field_name} must be at least 1")
-    if parsed > 20:
-        raise StrategyParseError(f"{field_name} is too high for the MVP")
+    if parsed > max_count:
+        raise StrategyParseError(f"{field_name} must not exceed {max_count}")
     return parsed
 
 
@@ -1036,7 +2107,9 @@ def _parse_non_negative_number(value: str, field_name: str) -> float:
     return parsed
 
 
-def _positive_int_from_payload(payload: dict[str, Any], key: str, default: int) -> int:
+def _positive_int_from_payload(
+    payload: dict[str, Any], key: str, default: int, max_count: int
+) -> int:
     if key not in payload:
         return default
     value = payload[key]
@@ -1047,30 +2120,61 @@ def _positive_int_from_payload(payload: dict[str, Any], key: str, default: int) 
     try:
         parsed = int(value)
     except (TypeError, ValueError) as exc:
-        raise StrategyParseError(f"strategy JSON field must be an integer: {key}") from exc
+        raise StrategyParseError(
+            f"strategy JSON field must be an integer: {key}"
+        ) from exc
     if parsed < 1:
         raise StrategyParseError(f"strategy JSON field must be at least 1: {key}")
-    if parsed > 20:
-        raise StrategyParseError(f"strategy JSON field is too high for the MVP: {key}")
+    if parsed > max_count:
+        raise StrategyParseError(
+            f"strategy JSON field must not exceed {max_count}: {key}"
+        )
     return parsed
 
 
-def _optional_positive_int_from_payload(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+def _positive_int_unbounded_from_payload(payload: dict[str, Any], key: str) -> int:
+    if key not in payload:
+        raise StrategyParseError(
+            f"strategy JSON action is missing required field: {key}"
+        )
+    value = payload[key]
+    if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
+        raise StrategyParseError(f"strategy JSON field must be an integer: {key}")
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as exc:
+        raise StrategyParseError(
+            f"strategy JSON field must be an integer: {key}"
+        ) from exc
+    if parsed < 1:
+        raise StrategyParseError(f"strategy JSON field must be at least 1: {key}")
+    return parsed
+
+
+def _optional_positive_int_from_payload(
+    payload: dict[str, Any], keys: tuple[str, ...], max_count: int
+) -> int | None:
     for key in keys:
         if key in payload:
-            return _positive_int_from_payload(payload, key, default=1)
+            return _positive_int_from_payload(
+                payload, key, default=1, max_count=max_count
+            )
     return None
 
 
 def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
     condition = normalize_wait_condition(str(payload.get("condition", "")))
-    at_least = _optional_number(payload, ("at_least", "count", "value", "minimum"), default=1)
+    at_least = _optional_number(
+        payload, ("at_least", "count", "value", "minimum"), default=1
+    )
     if at_least < 0:
         raise StrategyParseError("wait-until threshold must not be negative")
 
     target: str | None = None
     if condition.startswith("structure_"):
-        target_value = payload.get("target", payload.get("structure", payload.get("building", "")))
+        target_value = payload.get(
+            "target", payload.get("structure", payload.get("building", ""))
+        )
         target = normalize_structure_target(str(target_value))
     elif condition == "unit_count":
         target_value = payload.get("target", payload.get("unit", ""))
@@ -1078,7 +2182,6 @@ def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
     elif condition == "upgrade_complete":
         target_value = payload.get("target", payload.get("upgrade", ""))
         target = normalize_upgrade(str(target_value))
-
     return WaitUntilCommand(condition=condition, target=target, at_least=at_least)
 
 
@@ -1112,7 +2215,9 @@ def _unit_from_intent(text: str, default_unit: str) -> str:
     return normalize_unit(default_unit)
 
 
-def _route_plan(unit: str, route: tuple[tuple[float, float], ...], wait_seconds: float) -> StrategyPlan:
+def _route_plan(
+    unit: str, route: tuple[tuple[float, float], ...], wait_seconds: float
+) -> StrategyPlan:
     actions: list[StrategyAction] = []
     for index, (x, y) in enumerate(route):
         if index > 0 and wait_seconds > 0:
@@ -1178,19 +2283,30 @@ def normalize_building(building: str) -> str:
     try:
         return resolve_alias(building, categories=("structure",)).key
     except KeyError as exc:
-        raise StrategyParseError(f"unsupported Terran build structure: {building}") from exc
+        raise StrategyParseError(
+            f"unsupported Terran build structure: {building}"
+        ) from exc
 
 
 def normalize_structure_target(building: str) -> str:
     try:
         return resolve_alias(building, categories=("structure", "addon", "morph")).key
     except KeyError as exc:
-        raise StrategyParseError(f"unsupported Terran structure target: {building}") from exc
+        raise StrategyParseError(
+            f"unsupported Terran structure target: {building}"
+        ) from exc
 
 
 def normalize_production_structure(building: str) -> str:
     normalized = normalize_structure_target(building)
-    if normalized not in {"command_center", "orbital_command", "planetary_fortress", "barracks", "factory", "starport"}:
+    if normalized not in {
+        "command_center",
+        "orbital_command",
+        "planetary_fortress",
+        "barracks",
+        "factory",
+        "starport",
+    }:
         raise StrategyParseError(f"structure cannot rally produced units: {building}")
     return normalized
 
@@ -1199,14 +2315,18 @@ def normalize_addon(addon: str) -> str:
     try:
         return resolve_alias(addon, categories=("addon",)).key
     except KeyError as exc:
-        raise StrategyParseError(f"unsupported Terran production add-on: {addon}") from exc
+        raise StrategyParseError(
+            f"unsupported Terran production add-on: {addon}"
+        ) from exc
 
 
 def normalize_morph(building: str) -> str:
     try:
         return resolve_alias(building, categories=("morph",)).key
     except KeyError as exc:
-        raise StrategyParseError(f"unsupported Terran structure morph: {building}") from exc
+        raise StrategyParseError(
+            f"unsupported Terran structure morph: {building}"
+        ) from exc
 
 
 def normalize_upgrade(upgrade: str) -> str:
@@ -1218,13 +2338,136 @@ def normalize_upgrade(upgrade: str) -> str:
 
 def normalize_repair_target(target: str) -> str:
     try:
-        resolved = resolve_alias(target, categories=("unit", "structure", "addon", "morph"))
+        resolved = resolve_alias(
+            target,
+            categories=("unit", "special_unit", "structure", "addon", "morph"),
+        )
     except KeyError as exc:
         raise StrategyParseError(f"unsupported Terran repair target: {target}") from exc
-    canonical = "worker" if resolved.category == "unit" and resolved.key == "scv" else resolved.key
+    canonical = (
+        "worker"
+        if resolved.category == "unit" and resolved.key == "scv"
+        else resolved.key
+    )
     if canonical not in REPAIRABLE_TARGET_KEYS:
-        raise StrategyParseError(f"Terran SCVs cannot repair biological target: {target}")
+        raise StrategyParseError(
+            f"Terran SCVs cannot repair biological target: {target}"
+        )
     return canonical
+
+
+def normalize_ability(ability: str) -> str:
+    alias = {
+        "stim_marine": "stim_marine",
+        "stim_marauder": "stim_marauder",
+        "siege": "siege_mode",
+        "siege_tank_siege": "siege_mode",
+        "unsiege": "unsiege_mode",
+        "hellbat": "morph_hellbat",
+        "hellion": "morph_hellion",
+        "high_impact": "thor_high_impact_mode",
+        "explosive": "thor_explosive_mode",
+        "assault": "viking_assault_mode",
+        "fighter": "viking_fighter_mode",
+        "ag": "liberator_ag_mode",
+        "aa": "liberator_aa_mode",
+        "build_in_progress": "cancel_build_in_progress",
+        "queue_1": "cancel_queue_1",
+        "queue_5": "cancel_queue_5",
+        "any": "cancel_any",
+        "last": "cancel_last",
+    }.get(normalize_name(ability))
+    if alias:
+        return alias
+    try:
+        return resolve_ability(ability).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran ability: {ability}") from exc
+
+
+def normalize_cancel_ability(ability: str) -> str:
+    normalized = normalize_name(ability) or "any"
+    candidate = (
+        normalized if normalized.startswith("cancel_") else f"cancel_{normalized}"
+    )
+    try:
+        canonical = normalize_ability(candidate)
+    except StrategyParseError as exc:
+        raise StrategyParseError(f"unsupported cancel ability: {ability}") from exc
+    if not canonical.startswith("cancel_"):
+        raise StrategyParseError(f"unsupported cancel ability: {ability}")
+    return canonical
+
+
+def normalize_location(location: str) -> str:
+    try:
+        return resolve_location(location).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported semantic location: {location}") from exc
+
+
+def normalize_selection_mode(mode: str) -> str:
+    try:
+        return resolve_selection_mode(mode).key
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported selection mode: {mode}") from exc
+
+
+def normalize_ability_actor(actor: str) -> str:
+    normalized = actor.strip().lower()
+    if normalized in {"any", ""}:
+        return "any"
+    try:
+        resolved = resolve_alias(
+            actor,
+            categories=("unit", "special_unit", "structure", "addon", "morph"),
+        )
+    except KeyError as exc:
+        raise StrategyParseError(f"unsupported Terran ability actor: {actor}") from exc
+    return (
+        "worker"
+        if resolved.category == "unit" and resolved.key == "scv"
+        else resolved.key
+    )
+
+
+def normalize_target_unit(target: str) -> str:
+    text = target.strip()
+    if not text:
+        raise StrategyParseError("target unit is required")
+    selector_aliases = {
+        "enemy": "nearest_enemy",
+        "enemy_unit": "nearest_enemy",
+        "enemy_structure": "nearest_enemy_structure",
+        "enemy_ground": "nearest_enemy_ground",
+        "enemy_air": "nearest_enemy_air",
+        "enemy_biological": "nearest_enemy_biological",
+        "enemy_mechanical": "nearest_enemy_mechanical",
+        "enemy_massive": "nearest_enemy_massive",
+        "enemy_detector": "nearest_enemy_detector",
+        "friendly": "nearest_friendly",
+        "damaged": "damaged_friendly",
+        "any": "any_friendly",
+    }
+    normalized = normalize_name(text)
+    if normalized in TARGET_SELECTORS:
+        return normalized
+    if normalized in selector_aliases:
+        return selector_aliases[normalized]
+    try:
+        resolved = resolve_alias(
+            text,
+            categories=("unit", "special_unit", "structure", "addon", "morph"),
+        )
+    except KeyError as exc:
+        raise StrategyParseError(
+            f"unsupported Terran ability target: {target}"
+        ) from exc
+    return (
+        "worker"
+        if resolved.category == "unit" and resolved.key == "scv"
+        else resolved.key
+    )
 
 
 def normalize_unit(unit: str) -> str:
@@ -1232,7 +2475,19 @@ def normalize_unit(unit: str) -> str:
     if normalized in {"probe", "drone"}:
         return "worker"
     try:
-        key = resolve_alias(unit, categories=("unit",)).key
+        resolved = resolve_alias(
+            unit, categories=("unit", "special_unit", "structure", "morph")
+        )
     except KeyError as exc:
-        raise StrategyParseError(f"unsupported controllable Terran unit: {unit}") from exc
+        raise StrategyParseError(
+            f"unsupported controllable Terran unit: {unit}"
+        ) from exc
+    key = resolved.key
+    if (
+        resolved.category in {"structure", "morph"}
+        and key not in FLYING_STRUCTURE_ACTOR_KEYS
+    ):
+        raise StrategyParseError(
+            f"Terran structure cannot receive basic movement orders: {unit}"
+        )
     return "worker" if key == "scv" else key

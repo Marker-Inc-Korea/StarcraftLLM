@@ -8,42 +8,34 @@ StarcraftLLM은 자연어 목표를 **검증 가능한 StarCraft II 명령 계�
 자연어 목표 -> LLM/룰 플래너 -> StrategyPlan -> 로컬 검증기 -> BurnySC2 실행기
 ```
 
-LLM이 임의의 Python 코드나 SC2 API를 직접 호출하지 않습니다. 대신 공개된 명령 함수와 카탈로그에서만 행동을 선택하고, 자원·보급·선행 건물·애드온·업그레이드 조건을 실행 전에 검증합니다.
+LLM이 임의의 Python 코드나 SC2 API를 직접 호출하지 않습니다. 대신 공개된 명령 함수, Terran 카탈로그, 정적 능력 allowlist에서만 행동을 선택하고, 자원·보급·선행 건물·애드온·업그레이드·대상 형태를 실행 전에 검증합니다.
 
 ## LLM 명령 표면
 
-`starcraft_llm/commands.py`는 LLM이 호출할 수 있는 18개 안전 명령 함수를 제공합니다.
+기존 18개 매크로/제어 명령만으로는 표준 Terran 게임을 표현하기에 부족했습니다. Orbital 스캔/MULE, Siege Tank 모드 전환, Medivac 드랍, Raven/Battlecruiser 능력, lift/land, load/unload, nuke, cancel/salvage 같은 핵심 Terran 상호작용이 모두 빠져 있었기 때문입니다.
+
+`starcraft_llm/commands.py`는 현재 **32개 provider-neutral 함수 호출 명령**을 노출합니다. 기존 18개 함수 이름과 좌표 호출은 유지하면서, 이동·공격·순찰·집결·건설에 semantic location/selection을 추가하고 능력 명령 14개를 확장했습니다.
 
 | 영역 | 함수 | 의미 |
 | --- | --- | --- |
-| 이동/전투 | `move`, `attack_move`, `attack_enemy`, `patrol`, `hold_position`, `stop` | 유닛 그룹 이동과 기본 교전 명령 |
-| 집결/대기 | `rally`, `wait`, `wait_until` | 생산 건물 집결지 및 상태 기반 대기 |
+| 이동/전투 | `move`, `attack_move`, `attack_enemy`, `patrol`, `hold_position`, `stop` | 유닛/MULE 그룹 이동·교전 및 lift된 건물 이동 명령 |
+| 집결/대기 | `rally`, `wait`, `wait_until` | 생산 건물 집결지와 상태 기반 대기 |
 | 경제 | `gather`, `distribute_workers` | 미네랄/가스 채취와 일꾼 재분배 |
 | 생산/건설 | `train`, `build`, `expand`, `build_addon` | 유닛 생산, 건물·확장·애드온 건설 |
 | 테크/유지 | `morph`, `research`, `repair` | 사령부 변환, 업그레이드 연구, 수리 |
+| 정적 능력 | `use_ability` | `ABILITY_SPECS`에 등록된 Terran 능력만 직접 사용 |
+| 능력 래퍼 | `scan`, `call_down_mule`, `supply_drop`, `transform`, `lift`, `land`, `load`, `unload`, `cancel`, `salvage`, `build_nuke`, `launch_nuke`, `replan` | 자주 쓰는 능력을 typed wrapper로 안전하게 표현 |
 
-`llm_command_function_schemas()`는 이 함수들을 provider-neutral JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일의 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
+`llm_command_function_schemas()`는 이 32개 함수를 JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
 
 ```python
-from starcraft_llm.commands import (
-    llm_command_function_schemas,
-    strategy_plan_from_function_calls,
-)
-
-function_schemas = llm_command_function_schemas()
+from starcraft_llm.commands import strategy_plan_from_function_calls
 
 plan = strategy_plan_from_function_calls(
     [
-        {"name": "build", "arguments": {"building": "supply_depot"}},
-        {
-            "name": "wait_until",
-            "arguments": {
-                "condition": "structure_ready",
-                "target": "supply_depot",
-                "at_least": 1,
-            },
-        },
-        {"name": "build", "arguments": {"building": "barracks"}},
+        {"name": "scan", "arguments": {"location": "enemy_main"}},
+        {"name": "call_down_mule", "arguments": {"location": "nearest_mineral"}},
+        {"name": "transform", "arguments": {"ability": "siege_mode", "actor": "siege_tank"}},
     ]
 )
 ```
@@ -54,13 +46,63 @@ plan = strategy_plan_from_function_calls(
 
 `starcraft_llm/command_catalog.py`가 LLM prompt, 파서, 검증기, 실행기의 단일 명칭/비용/선행 조건 소스입니다. 영어·한국어 별칭을 canonical snake_case 키로 정규화합니다.
 
-- 표준 유닛 17종: SCV, Marine, Marauder, Reaper, Ghost, Hellion, Hellbat, Widow Mine, Cyclone, Siege Tank, Thor, Viking, Medivac, Liberator, Raven, Banshee, Battlecruiser
+- 생산 가능한 표준 유닛 17종: SCV, Marine, Marauder, Reaper, Ghost, Hellion, Hellbat, Widow Mine, Cyclone, Siege Tank, Thor, Viking, Medivac, Liberator, Raven, Banshee, Battlecruiser
+- 소환 제어 유닛 1종: MULE (`move`/`patrol`/`hold`/`stop`, 미네랄 채취, 기계 유닛·건물 수리)
+- 비행 이동 건물 5종: lift된 Command Center, Orbital Command, Barracks, Factory, Starport (`move`/`patrol`/`hold`/`stop`; grounded form은 실행기에서 제외)
 - 건물 13종: Command Center, Supply Depot, Refinery, Barracks, Engineering Bay, Bunker, Missile Turret, Sensor Tower, Factory, Ghost Academy, Starport, Armory, Fusion Core
 - 애드온 6종: Barracks/Factory/Starport의 Tech Lab과 Reactor
 - 사령부 변환 2종: Orbital Command, Planetary Fortress
 - Terran 업그레이드 31종: 보병·차량·함선 공방업과 Stimpack, Combat Shield, Cloaking, Yamato 등
+- Terran 능력 81종: 아래 allowlist만 `use_ability` 또는 typed wrapper로 사용 가능
 
-카탈로그 메타데이터는 [SC2 5.0.15](https://news.blizzard.com/en-us/article/24225313/starcraft-ii-5-0-15-patch-notes) 기준으로 고정되어 있고, 모든 enum 이름은 설치된 BurnySC2의 `UnitTypeId`/`UpgradeId`와 대조합니다.
+카탈로그 메타데이터는 [SC2 5.0.15](https://news.blizzard.com/en-us/article/24225313/starcraft-ii-5-0-15-patch-notes) 기준으로 고정되어 있고, 모든 enum 이름은 프로젝트 `.venv`에 설치된 BurnySC2의 `UnitTypeId`/`UpgradeId`/`AbilityId`와 대조합니다. BurnySC2가 없는 별도 Python 환경에서만 enum 대조 테스트가 skip됩니다.
+
+### 능력 allowlist
+
+`use_ability`는 raw `AbilityId` 문자열을 받지 않습니다. 아래 canonical key만 받으며, 각 key는 내부적으로 BurnySC2 `AbilityId` enum 이름과 대상 형태(`none`, `point`, `unit`, MULE용 `mineral`)를 가집니다.
+
+| 범주 | 능력 key |
+| --- | --- |
+| 보병/은폐/유닛 능력 | `stim_marine`, `stim_marauder`, `kd8_charge`, `ghost_cloak_on`, `ghost_cloak_off`, `ghost_hold_fire_on`, `ghost_hold_fire_off`, `ghost_snipe`, `ghost_emp`, `ghost_nuke_call_down`, `banshee_cloak_on`, `banshee_cloak_off`, `medivac_afterburners`, `medivac_heal` |
+| 모드 전환 | `morph_hellbat`, `morph_hellion`, `siege_mode`, `unsiege_mode`, `thor_high_impact_mode`, `thor_explosive_mode`, `viking_assault_mode`, `viking_fighter_mode`, `liberator_ag_mode`, `liberator_aa_mode`, `lower_supply_depot`, `raise_supply_depot` |
+| 고급 전투 능력 | `widow_mine_burrow_down`, `widow_mine_burrow_up`, `cyclone_lock_on`, `cyclone_cancel_lock_on`, `raven_auto_turret`, `raven_interference_matrix`, `raven_anti_armor_missile`, `battlecruiser_tactical_jump`, `battlecruiser_yamato` |
+| Orbital Command | `scan`, `call_down_mule`, `supply_drop` |
+| MULE | `mule_gather`, `mule_repair` |
+| 건물 lift/land | `lift_command_center`, `land_command_center`, `lift_orbital_command`, `land_orbital_command`, `lift_barracks`, `land_barracks`, `lift_factory`, `land_factory`, `lift_starport`, `land_starport` |
+| 수송 | `load_all_command_center`, `unload_all_command_center`, `unload_unit_command_center`, `load_bunker`, `unload_all_bunker`, `unload_unit_bunker`, `load_medivac`, `unload_all_medivac`, `unload_unit_medivac` |
+| 핵 | `build_nuke`, `launch_nuke` |
+| 취소 | `cancel_any`, `cancel_build_in_progress`, `cancel_queue_1`, `cancel_queue_5`, `cancel_queue_addon`, `cancel_slot`, `cancel_slot_queue_cancel_to_selection`, `cancel_slot_queue_passive`, `cancel_slot_queue_passive_cancel_to_selection`, `cancel_addon_barracks`, `cancel_addon_factory`, `cancel_addon_starport`, `cancel_morph_orbital`, `cancel_morph_planetary_fortress`, `cancel_morph_thor_explosive_mode`, `cancel_lock_on`, `cancel_nuke`, `cancel_last` |
+| 회수 | `salvage_bunker`, `salvage_sensor_tower` |
+
+### 대상 형태와 선택 제한
+
+능력 명령은 명시적인 target shape를 사용합니다.
+
+| 형태 | 입력 | 예시 |
+| --- | --- | --- |
+| 대상 없음 | `ability`, `actor`, optional `selection`, `queued` | `{"type":"use_ability","ability":"stim_marine","actor":"marine"}` |
+| 지점 대상 | `location` 또는 `x`/`y` | `{"type":"scan","location":"enemy_main"}` |
+| 유닛 대상 | `target_unit` 또는 `target` semantic alias | `{"type":"use_ability","ability":"battlecruiser_yamato","actor":"battlecruiser","target":"nearest_enemy_structure"}` |
+| 미네랄 대상 | 미네랄을 찾을 `location` 또는 `x`/`y` anchor | `{"type":"call_down_mule","location":"nearest_mineral"}` |
+
+유닛 대상 selector에는 `nearest_enemy`, `nearest_enemy_structure`, 지상/공중/생체/기계/거대/탐지기 필터, `lowest_health_enemy`, `highest_energy_enemy`, `nearest_friendly`, `damaged_friendly`, `any_friendly`가 포함됩니다. 능력별 `target_filter`가 Snipe/Medivac Heal의 생체 유닛, Interference Matrix의 기계 또는 사이오닉 유닛, MULE 수리의 기계 대상, Supply Drop의 보급고, Bunker/Medivac의 적재 가능 유닛을 검증기와 실행기 양쪽에서 제한합니다.
+
+Semantic location allowlist는 정확히 다음 15개입니다.
+
+```text
+own_main, own_natural, own_third, own_ramp,
+enemy_main, enemy_natural, enemy_third,
+map_center, frontline, retreat, proxy, next_expansion,
+nearest_enemy, nearest_enemy_structure, nearest_mineral
+```
+
+`selection`은 persistent control group이 아니라 단일 action 안에서만 쓰는 bounded selector입니다.
+
+```json
+{"selection": {"mode": "closest", "count": 1}}
+```
+
+허용 mode는 `all`, `ready`, `idle`, `closest`, `lowest_health`입니다. `selection.count`와 유닛 생산 count 상한은 200입니다. 전체 plan은 최대 24 actions, 건물·애드온·확장 count는 최대 20, worker 배정·수리 count는 최대 100입니다. 좌표는 0~256 범위, `wait`는 최대 30초입니다. 긴 반복은 action 복제 대신 `count`, bounded `selection`, `wait_until`, `replan` checkpoint로 나눠야 합니다.
 
 ## StrategyPlan 입력 형식
 
@@ -70,11 +112,12 @@ plan = strategy_plan_from_function_calls(
 
 ```text
 gather minerals 8; wait until minerals 100; build supply depot
-build supply depot; wait until structure supply depot ready; build barracks
 build factory; wait until structure factory ready; addon factory tech lab; wait until structure factory tech lab ready; train siege tank 2
-addon barracks tech lab; wait until structure barracks tech lab ready; research stimpack; wait until upgrade stimpack complete
-expand; wait until townhalls 2; distribute workers 2
-rally barracks 45 42; patrol marine 55 45; hold marine
+use ability stim marine with marine count 8; attack marine enemy
+scan enemy main; mule nearest mineral; supply drop supply depot
+transform siege tank siege; lift barracks; land barracks proxy
+load medivac marine 8; unload medivac enemy main
+cancel queue 1; salvage bunker; build nuke; launch nuke enemy main; replan ability unavailable
 ```
 
 ### 2. JSON
@@ -82,11 +125,10 @@ rally barracks 45 42; patrol marine 55 45; hold marine
 ```json
 {
   "actions": [
-    {"type": "gather", "unit": "worker", "resource": "minerals", "workers": 8},
-    {"type": "wait_until", "condition": "minerals", "at_least": 100},
-    {"type": "build", "building": "supply_depot", "worker": "worker", "count": 1},
-    {"type": "wait_until", "condition": "structure_ready", "target": "supply_depot", "at_least": 1},
-    {"type": "build", "building": "barracks", "worker": "worker", "count": 1}
+    {"type": "scan", "location": "enemy_main"},
+    {"type": "call_down_mule", "location": "nearest_mineral"},
+    {"type": "use_ability", "ability": "raven_auto_turret", "actor": "raven", "location": "frontline", "selection": {"mode": "closest", "count": 1}},
+    {"type": "use_ability", "ability": "battlecruiser_yamato", "actor": "battlecruiser", "target": "nearest_enemy_structure"}
   ]
 }
 ```
@@ -107,9 +149,65 @@ rally barracks 45 42; patrol marine 55 45; hold marine
 
 더 긴 목표와 빌드 오더는 `gemini` planner가 동일한 카탈로그와 `StrategyPlan` schema를 사용해 생성합니다.
 
+## 대표 전략 예시
+
+아래 예시는 모두 `strategy_plan_from_dict()`와 `validate_strategy_plan()`으로 검증되는 shape입니다. 실제 성공 여부는 맵, 상대, 현재 관측, 컨트롤 품질에 따라 달라집니다.
+
+### Proxy Barracks pressure
+
+```json
+{
+  "actions": [
+    {"type": "build", "building": "barracks", "location": "proxy", "selection": {"mode": "closest", "count": 1}},
+    {"type": "train", "unit": "marine", "count": 3},
+    {"type": "rally", "building": "barracks", "location": "enemy_natural"},
+    {"type": "attack", "unit": "marine", "location": "enemy_main", "selection": {"count": 3}}
+  ]
+}
+```
+
+### Medivac drop
+
+```json
+{
+  "actions": [
+    {"type": "load", "transport": "medivac", "unit": "marine", "count": 8},
+    {"type": "use_ability", "ability": "medivac_afterburners", "actor": "medivac", "selection": {"count": 1}},
+    {"type": "move", "unit": "medivac", "location": "enemy_main"},
+    {"type": "unload", "transport": "medivac", "location": "enemy_main"}
+  ]
+}
+```
+
+### Orbital scan and MULE via function calls
+
+```json
+[
+  {"name": "scan", "arguments": {"location": "enemy_main"}},
+  {"name": "call_down_mule", "arguments": {"location": "nearest_mineral"}},
+  {"name": "supply_drop", "arguments": {"target_unit": "supply_depot"}}
+]
+```
+
+### Siege, air control, and nuke
+
+```json
+{
+  "actions": [
+    {"type": "transform", "actor": "siege_tank", "mode": "siege", "selection": {"count": 2}},
+    {"type": "use_ability", "ability": "liberator_ag_mode", "actor": "liberator", "location": "frontline"},
+    {"type": "use_ability", "ability": "raven_interference_matrix", "actor": "raven", "target": "nearest_enemy"},
+    {"type": "use_ability", "ability": "battlecruiser_tactical_jump", "actor": "battlecruiser", "location": "enemy_main"},
+    {"type": "build_nuke"},
+    {"type": "use_ability", "ability": "ghost_cloak_on", "actor": "ghost"},
+    {"type": "launch_nuke", "location": "enemy_main"}
+  ]
+}
+```
+
 ## 검증과 실행
 
-`starcraft_llm/validator.py`는 최대 10개 행동을 순서대로 시뮬레이션합니다.
+`starcraft_llm/validator.py`는 최대 24개 행동을 순서대로 시뮬레이션합니다.
 
 - 좌표 범위, 유한 숫자, 대기 시간, count 상한 검증
 - 현재/계획된 minerals, vespene, supply 사용량 추적
@@ -117,9 +215,12 @@ rally barracks 45 42; patrol marine 55 45; hold marine
 - 건설 시작과 `wait_until structure_ready`를 구분
 - 업그레이드 비용, 연구 건물, 선행 레벨 및 완료 대기 검증
 - gas 채취, expansion, morph, repair, rally 대상 검증
-- 알 수 없는 명령·유닛·건물·업그레이드 거부
+- ability key, actor, target shape, semantic location, selector, queued flag 검증
+- 알 수 없는 명령·유닛·건물·업그레이드·능력 거부
 
-`starcraft_llm/sc2_bot.py`는 검증된 행동을 BurnySC2 API로 실행합니다. 건설 위치와 확장 위치는 executor가 선택하며, 생산 가능한 건물과 필요한 애드온을 자동으로 찾습니다.
+능력의 에너지, 쿨다운, 현재 form, 주문 가능 여부는 정적 검증만으로 확정하지 않습니다. `starcraft_llm/sc2_bot.py`가 실행 직전에 BurnySC2 `get_available_abilities`(주입 runtime에서는 동등한 query hook)로 live availability를 확인하고, 후보가 여러 기면 실제 사용 가능한 source를 먼저 고른 뒤 명령을 발행합니다. 공성/비행/매설/하강 형태의 별도 `UnitTypeId`도 canonical actor로 합쳐 선택합니다.
+
+능력이 아직 불가능하거나 대상 semantic location을 해결할 수 없으면 executor는 같은 action을 deterministic하게 재시도합니다. 기본 재시도 창은 30 in-game seconds입니다. 그 뒤 `original_strategy`가 있고 replan 한도(최대 2회)가 남아 있으면 새 관측으로 재계획하고, 한도를 넘으면 게임을 떠나 terminal failure로 종료합니다. `replan` action은 의도적인 bounded closed-loop checkpoint입니다.
 
 관측 payload에는 다음이 포함됩니다.
 
@@ -129,6 +230,8 @@ rally barracks 45 42; patrol marine 55 45; hold marine
 - structures / structures_ready / structures_pending
 - 완료된 upgrades
 - known enemy unit 수, game time seconds
+- ability-relevant `unit_observations`: tag, 위치, health, energy, ready/flying/burrowed/loaded/idle, cargo, orders
+- allowlisted `semantic_locations` snapshot
 
 ## 실행 방법
 
@@ -158,9 +261,9 @@ export SC2PATH="/path/to/StarCraft II"
 
 ```bash
 python scripts/run_sc2_movement.py --strategy "build supply depot; wait until structure supply depot ready; build barracks" --print-plan
-python scripts/run_sc2_movement.py --strategy "expand; wait until townhalls 2; distribute workers" --print-plan
-python scripts/run_sc2_movement.py --strategy "병영 기술실 건설" --print-plan
-python scripts/run_sc2_movement.py --print-state --fast
+python scripts/run_sc2_movement.py --strategy "scan enemy main; mule nearest mineral" --print-plan
+python scripts/run_sc2_movement.py --strategy "load medivac marine 8; unload medivac enemy main" --print-plan
+python scripts/run_sc2_movement.py --strategy "transform siege tank siege; launch nuke enemy main" --print-plan
 ```
 
 ### Gemini planner
@@ -188,15 +291,16 @@ python3 -m unittest discover -s tests -v
 npm run test:all
 ```
 
-테스트는 브라우저 이동, DSL/JSON/자연어 파싱, 함수 schema/adapter, 카탈로그 별칭, 상태 시뮬레이션 검증, fake BurnySC2 실행을 다룹니다.
+테스트는 브라우저 이동, DSL/JSON/자연어 파싱, 함수 schema/adapter, 카탈로그 별칭, complete Terran ability surface, 상태 시뮬레이션 검증, fake BurnySC2 실행을 다룹니다.
 
-## 현재 제한
+## 호환성과 현재 제한
 
+- 기존 18개 함수 이름, JSON root shape `{"actions": [...]}`, JSON action array shortcut, OpenAI-style nested function-call adapter는 유지됩니다.
 - `openai` planner와 외부 `server` planner 클라이언트는 아직 연결되지 않았지만, 공통 함수 schema와 adapter는 준비되어 있습니다.
-- 실시간 멀티 사이클 closed-loop replanning, 적 조합에 따른 전략 전환, 완성형 래더 AI는 범위 밖입니다.
+- 현재 범위는 **Terran standard melee command surface**입니다. 표준 Terran 유닛·건물·업그레이드·능력 표현을 넓힌 것이며, 임의 SC2 API 호출, 비-Terran 종족, 커스텀 모드, 임의 adaptive ladder AI를 의미하지 않습니다.
+- 실시간 멀티 사이클 전략 지능, 적 조합에 따른 장기 전략 전환, 완성형 래더 승률 보장은 범위 밖입니다.
 - 건물 배치는 안전한 근처 위치를 찾는 단순 정책이며 wall-off나 지형 최적화는 하지 않습니다.
-- scan, MULE, siege/unsiege, cloak, lift/land, load/unload처럼 대상·에너지·현재 모드 검증이 필요한 개별 능력은 아직 공개 명령 표면에 포함하지 않습니다.
-- 현재 카탈로그와 검증기는 Terran 중심입니다.
+- live ability availability는 executor가 확인하지만, 그것이 전투 micro 품질이나 승리를 보장하지 않습니다.
 
 ## 디렉터리 구조
 
@@ -211,4 +315,4 @@ docs/                 개발 원칙 문서
 
 ## 한 줄 요약
 
-StarcraftLLM은 **LLM의 목표를 허용 목록 기반 Terran 명령 함수로 제한하고, 계획 전체를 검증한 뒤 실제 StarCraft II API로 실행하는 안전한 명령 계층**입니다.
+StarcraftLLM은 **LLM의 목표를 허용 목록 기반 Terran 명령 함수와 정적 능력 카탈로그로 제한하고, 계획 전체를 검증한 뒤 실제 StarCraft II API로 실행하는 안전한 명령 계층**입니다.

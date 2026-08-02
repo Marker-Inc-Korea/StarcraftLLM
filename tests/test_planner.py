@@ -48,7 +48,11 @@ class PlannerInterfaceTest(unittest.TestCase):
                 "output_text": json.dumps(
                     {
                         "actions": [
-                            {"type": "gather", "unit": "worker", "resource": "minerals"},
+                            {
+                                "type": "gather",
+                                "unit": "worker",
+                                "resource": "minerals",
+                            },
                             {"type": "train", "unit": "scv"},
                         ]
                     }
@@ -68,7 +72,9 @@ class PlannerInterfaceTest(unittest.TestCase):
         self.assertIn("/interactions", captured["url"])
         self.assertEqual(captured["headers"]["x-goog-api-key"], "test-key")
         self.assertEqual(captured["payload"]["model"], "gemini-2.5-flash")
-        self.assertEqual(captured["payload"]["response_format"]["mime_type"], "application/json")
+        self.assertEqual(
+            captured["payload"]["response_format"]["mime_type"], "application/json"
+        )
         self.assertIn("early economy", captured["payload"]["input"])
         self.assertIn("wait_until", captured["payload"]["input"])
         self.assertIn("structures_ready", captured["payload"]["input"])
@@ -81,7 +87,9 @@ class PlannerInterfaceTest(unittest.TestCase):
 
     def test_gemini_schema_covers_the_complete_strategy_action_surface(self):
         action_types = set(
-            strategy_plan_json_schema()["properties"]["actions"]["items"]["properties"]["type"]["enum"]
+            strategy_plan_json_schema()["properties"]["actions"]["items"]["properties"][
+                "type"
+            ]["enum"]
         )
 
         self.assertEqual(
@@ -105,6 +113,20 @@ class PlannerInterfaceTest(unittest.TestCase):
                 "morph",
                 "research",
                 "repair",
+                "use_ability",
+                "scan",
+                "call_down_mule",
+                "supply_drop",
+                "transform",
+                "lift",
+                "land",
+                "load",
+                "unload",
+                "cancel",
+                "salvage",
+                "build_nuke",
+                "launch_nuke",
+                "replan",
             },
         )
 
@@ -112,7 +134,11 @@ class PlannerInterfaceTest(unittest.TestCase):
         def fake_post(url, headers, payload, timeout):
             return {
                 "output_text": json.dumps(
-                    {"plan": [{"type": "gather", "unit": "worker", "resource": "minerals"}]}
+                    {
+                        "plan": [
+                            {"type": "gather", "unit": "worker", "resource": "minerals"}
+                        ]
+                    }
                 )
             }
 
@@ -128,7 +154,10 @@ class PlannerInterfaceTest(unittest.TestCase):
                     {
                         "type": "model_output",
                         "content": [
-                            {"type": "text", "text": '{"actions":[{"type":"train","unit":"scv"}]}'},
+                            {
+                                "type": "text",
+                                "text": '{"actions":[{"type":"train","unit":"scv"}]}',
+                            },
                         ],
                     }
                 ]
@@ -139,13 +168,14 @@ class PlannerInterfaceTest(unittest.TestCase):
 
         self.assertEqual(plan.actions, (TrainUnitCommand(unit="scv"),))
 
-
     def test_gemini_planner_prompt_includes_game_state(self):
         captured = {}
 
         def fake_post(url, headers, payload, timeout):
             captured["payload"] = payload
-            return {"output_text": '{"actions":[{"type":"gather","unit":"worker","resource":"minerals"}]}'}
+            return {
+                "output_text": '{"actions":[{"type":"gather","unit":"worker","resource":"minerals"}]}'
+            }
 
         planner = GeminiPlanner(api_key="test-key", http_post=fake_post)
         planner.create_plan(
@@ -178,13 +208,17 @@ class PlannerInterfaceTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             key_file = Path(temp_dir) / "gemini_api_key.txt"
             key_file.write_text("file-key\n", encoding="utf-8")
-            with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}, clear=False):
+            with patch.dict(
+                os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}, clear=False
+            ):
                 self.assertEqual(load_gemini_api_key(key_file), "file-key")
 
     def test_gemini_api_key_missing_is_configuration_error(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             missing_key_file = Path(temp_dir) / "missing.txt"
-            with patch.dict(os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}, clear=False):
+            with patch.dict(
+                os.environ, {"GEMINI_API_KEY": "", "GOOGLE_API_KEY": ""}, clear=False
+            ):
                 with self.assertRaises(PlannerUnavailableError):
                     load_gemini_api_key(missing_key_file)
 

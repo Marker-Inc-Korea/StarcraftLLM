@@ -3,7 +3,11 @@ import contextlib
 import io
 import unittest
 
-from starcraft_llm.sc2_bot import create_game_state_bot_class, create_move_unit_bot_class, summarize_bot_state
+from starcraft_llm.sc2_bot import (
+    create_game_state_bot_class,
+    create_move_unit_bot_class,
+    summarize_bot_state,
+)
 from starcraft_llm.strategy import (
     AttackEnemyCommand,
     AttackMoveCommand,
@@ -84,7 +88,13 @@ class FakeUnits(list):
         return self[0]
 
     def of_type(self, unit_types):
-        return FakeUnits([unit for unit in self if unit.type_id in unit_types or unit.type_id.name in unit_types])
+        return FakeUnits(
+            [
+                unit
+                for unit in self
+                if unit.type_id in unit_types or unit.type_id.name in unit_types
+            ]
+        )
 
     def closest_to(self, _unit):
         return self[0]
@@ -138,8 +148,8 @@ class GameStateBotTest(unittest.TestCase):
         self.assertEqual(summary.workers, 2)
         self.assertEqual(summary.townhalls, 1)
         self.assertEqual(summary.army, {"marine": 1})
-        self.assertEqual(summary.structures, {"commandcenter": 1})
-        self.assertEqual(summary.structures_ready, {"commandcenter": 1})
+        self.assertEqual(summary.structures, {"command_center": 1})
+        self.assertEqual(summary.structures_ready, {"command_center": 1})
         self.assertEqual(summary.structures_pending, {})
         self.assertEqual(summary.known_enemy_units, 1)
         self.assertEqual(summary.game_time_seconds, 7.25)
@@ -218,7 +228,6 @@ class StrategyPlanBotTest(unittest.TestCase):
         self.assertEqual(marine.attack_targets, [enemy])
         self.assertTrue(bot.client.left)
 
-
     def test_bot_executes_build_train_marine_and_attack_actions(self):
         bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
         plan = StrategyPlan(
@@ -265,7 +274,9 @@ class StrategyPlanBotTest(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             asyncio.run(run_plan())
 
-        self.assertEqual(bot.workers[0].build_orders, [("REFINERY", bot.vespene_geyser[0])])
+        self.assertEqual(
+            bot.workers[0].build_orders, [("REFINERY", bot.vespene_geyser[0])]
+        )
         self.assertTrue(bot.client.left)
 
     def test_bot_waits_until_condition_is_met(self):
@@ -296,7 +307,9 @@ class StrategyPlanBotTest(unittest.TestCase):
         bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
         plan = StrategyPlan(
             actions=(
-                WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
+                WaitUntilCommand(
+                    condition="structure_ready", target="supply_depot", at_least=1
+                ),
                 TrainUnitCommand(unit="scv"),
             )
         )
@@ -393,6 +406,31 @@ class StrategyPlanBotTest(unittest.TestCase):
         self.assertTrue(bot.client.left)
         self.assertEqual(bot.workers[0].targets, [(1, 2), (3, 4)])
         self.assertEqual(bot.workers[1].targets, [(1, 2), (3, 4)])
+
+    def test_bot_wait_uses_game_time_instead_of_wall_clock(self):
+        bot_class = create_move_unit_bot_class(FakeBotAI, lambda point: point)
+        plan = StrategyPlan(
+            actions=(
+                WaitCommand(seconds=2),
+                MoveCommand(unit="worker", x=3, y=4),
+            )
+        )
+        bot = bot_class(plan, stop_after_seconds=0)
+
+        async def run_plan():
+            await bot.on_start()
+            await bot.on_step(1)
+            bot.time += 1
+            await bot.on_step(2)
+            self.assertEqual(bot.workers[0].targets, [])
+            bot.time += 1
+            await bot.on_step(3)
+            await bot.on_step(4)
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            asyncio.run(run_plan())
+
+        self.assertEqual(bot.workers[0].targets, [(3, 4)])
 
 
 if __name__ == "__main__":

@@ -30,7 +30,12 @@ class PlanValidatorTest(unittest.TestCase):
     def test_accepts_gather_gas_with_ready_refinery(self):
         plan = StrategyPlan(actions=(GatherGasCommand(unit="worker"),))
 
-        self.assertIs(validate_strategy_plan(plan, _state(structures={"commandcenter": 1, "refinery": 1})), plan)
+        self.assertIs(
+            validate_strategy_plan(
+                plan, _state(structures={"commandcenter": 1, "refinery": 1})
+            ),
+            plan,
+        )
 
     def test_accepts_train_count_and_attack_enemy(self):
         plan = StrategyPlan(
@@ -44,7 +49,11 @@ class PlanValidatorTest(unittest.TestCase):
         self.assertIs(
             validate_strategy_plan(
                 plan,
-                _state(minerals=200, supply_left=3, structures={"commandcenter": 1, "barracks": 1}),
+                _state(
+                    minerals=200,
+                    supply_left=3,
+                    structures={"commandcenter": 1, "barracks": 1},
+                ),
             ),
             plan,
         )
@@ -53,19 +62,28 @@ class PlanValidatorTest(unittest.TestCase):
         plan = StrategyPlan(
             actions=(
                 BuildStructureCommand(building="barracks"),
-                WaitUntilCommand(condition="structure_ready", target="barracks", at_least=1),
+                WaitUntilCommand(
+                    condition="structure_ready", target="barracks", at_least=1
+                ),
                 TrainUnitCommand(unit="marine"),
                 AttackMoveCommand(unit="marine", x=55, y=45),
             )
         )
 
-        self.assertIs(validate_strategy_plan(plan, _state(minerals=250, structures={"supplydepot": 1})), plan)
+        self.assertIs(
+            validate_strategy_plan(
+                plan, _state(minerals=250, structures={"supplydepot": 1})
+            ),
+            plan,
+        )
 
     def test_accepts_supply_depot_wait_ready_then_barracks_plan(self):
         plan = StrategyPlan(
             actions=(
                 BuildStructureCommand(building="supply_depot"),
-                WaitUntilCommand(condition="structure_ready", target="supply_depot", at_least=1),
+                WaitUntilCommand(
+                    condition="structure_ready", target="supply_depot", at_least=1
+                ),
                 BuildStructureCommand(building="barracks"),
             )
         )
@@ -90,7 +108,9 @@ class PlanValidatorTest(unittest.TestCase):
             )
         )
 
-        self.assertIs(validate_strategy_plan(plan, _state(minerals=50, workers=8)), plan)
+        self.assertIs(
+            validate_strategy_plan(plan, _state(minerals=50, workers=8)), plan
+        )
 
     def test_rejects_train_scv_without_enough_minerals(self):
         plan = StrategyPlan(actions=(TrainUnitCommand(unit="scv"),))
@@ -181,19 +201,25 @@ class PlanValidatorTest(unittest.TestCase):
             validate_strategy_plan(plan)
 
     def test_rejects_impossible_wait_until_unit_count(self):
-        plan = StrategyPlan(actions=(WaitUntilCommand(condition="unit_count", target="marine", at_least=1),))
+        plan = StrategyPlan(
+            actions=(
+                WaitUntilCommand(condition="unit_count", target="marine", at_least=1),
+            )
+        )
 
         with self.assertRaisesRegex(PlanValidationError, "cannot wait"):
             validate_strategy_plan(plan, _state())
 
     def test_rejects_unknown_wait_until_condition(self):
-        plan = StrategyPlan(actions=(WaitUntilCommand(condition="enemy_base_seen", at_least=1),))
+        plan = StrategyPlan(
+            actions=(WaitUntilCommand(condition="enemy_base_seen", at_least=1),)
+        )
 
         with self.assertRaisesRegex(PlanValidationError, "unsupported wait-until"):
             validate_strategy_plan(plan)
 
     def test_rejects_too_many_actions(self):
-        plan = StrategyPlan(actions=tuple(WaitCommand(seconds=0) for _ in range(11)))
+        plan = StrategyPlan(actions=tuple(WaitCommand(seconds=0) for _ in range(25)))
 
         with self.assertRaisesRegex(PlanValidationError, "too many"):
             validate_strategy_plan(plan)

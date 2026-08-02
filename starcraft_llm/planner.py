@@ -8,15 +8,30 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from starcraft_llm.command_catalog import build_command_prompt_section
+from starcraft_llm.command_catalog import (
+    ABILITY_SPECS,
+    LOCATION_SPECS,
+    MAX_PLAN_ACTIONS,
+    MAX_SELECTION_COUNT,
+    MAX_STRUCTURE_ACTION_COUNT,
+    MAX_WORKER_ASSIGNMENT_COUNT,
+    TARGET_SELECTORS,
+    build_command_prompt_section,
+)
 from starcraft_llm.game_state import GameStateSummary, game_state_summary_to_dict
-from starcraft_llm.strategy import StrategyPlan, parse_strategy_request, strategy_plan_from_dict
+from starcraft_llm.strategy import (
+    StrategyPlan,
+    parse_strategy_request,
+    strategy_plan_from_dict,
+)
 
 DEFAULT_PLANNER = "rule"
 PLANNER_MODES = ("rule", "gemini", "openai", "server")
 DEFAULT_GEMINI_MODEL = "gemini-2.5-flash"
 DEFAULT_GEMINI_API_KEY_FILE = Path(".secrets/gemini_api_key.txt")
-_GEMINI_INTERACTIONS_URL = "https://generativelanguage.googleapis.com/v1beta/interactions"
+_GEMINI_INTERACTIONS_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/interactions"
+)
 
 HttpPost = Callable[[str, dict[str, str], dict[str, Any], float], dict[str, Any]]
 
@@ -58,7 +73,9 @@ class RuleBasedPlanner:
     name = "rule"
 
     def create_plan(self, request: PlannerRequest) -> StrategyPlan:
-        return parse_strategy_request(request.strategy, default_unit=request.default_unit)
+        return parse_strategy_request(
+            request.strategy, default_unit=request.default_unit
+        )
 
 
 class GeminiPlanner:
@@ -75,11 +92,15 @@ class GeminiPlanner:
         http_post: HttpPost | None = None,
     ):
         self.api_key = api_key
-        self.model = model or os.environ.get("STARCRAFT_LLM_GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.model = model or os.environ.get(
+            "STARCRAFT_LLM_GEMINI_MODEL", DEFAULT_GEMINI_MODEL
+        )
         api_key_path = (
             api_key_file
             if api_key_file is not None
-            else os.environ.get("STARCRAFT_LLM_GEMINI_API_KEY_FILE", str(DEFAULT_GEMINI_API_KEY_FILE))
+            else os.environ.get(
+                "STARCRAFT_LLM_GEMINI_API_KEY_FILE", str(DEFAULT_GEMINI_API_KEY_FILE)
+            )
         )
         self.api_key_file = Path(api_key_path)
         self.timeout_seconds = timeout_seconds
@@ -109,13 +130,19 @@ class GeminiPlanner:
         try:
             plan_payload = json.loads(output_text)
         except json.JSONDecodeError as exc:
-            raise PlannerError(f"Gemini planner returned invalid JSON: {exc.msg}") from exc
+            raise PlannerError(
+                f"Gemini planner returned invalid JSON: {exc.msg}"
+            ) from exc
 
         plan_payload = _normalize_gemini_plan_payload(plan_payload)
         try:
-            return strategy_plan_from_dict(plan_payload, default_unit=request.default_unit)
+            return strategy_plan_from_dict(
+                plan_payload, default_unit=request.default_unit
+            )
         except Exception as exc:
-            raise PlannerError(f"Gemini planner returned an invalid StrategyPlan: {exc}") from exc
+            raise PlannerError(
+                f"Gemini planner returned an invalid StrategyPlan: {exc}"
+            ) from exc
 
 
 class _UnavailablePlanner:
@@ -166,7 +193,9 @@ def plan_strategy(
 ) -> StrategyPlan:
     planner = create_planner(planner_name)
     return planner.create_plan(
-        PlannerRequest(strategy=strategy, game_state=game_state, default_unit=default_unit)
+        PlannerRequest(
+            strategy=strategy, game_state=game_state, default_unit=default_unit
+        )
     )
 
 
@@ -197,6 +226,7 @@ def strategy_plan_json_schema() -> dict[str, Any]:
         "properties": {
             "actions": {
                 "type": "array",
+                "maxItems": MAX_PLAN_ACTIONS,
                 "items": {
                     "type": "object",
                     "properties": {
@@ -221,24 +251,72 @@ def strategy_plan_json_schema() -> dict[str, Any]:
                                 "morph",
                                 "research",
                                 "repair",
+                                "use_ability",
+                                "scan",
+                                "call_down_mule",
+                                "supply_drop",
+                                "transform",
+                                "lift",
+                                "land",
+                                "load",
+                                "unload",
+                                "cancel",
+                                "salvage",
+                                "build_nuke",
+                                "launch_nuke",
+                                "replan",
                             ],
                         },
                         "unit": {"type": "string"},
-                        "x": {"type": "number"},
-                        "y": {"type": "number"},
-                        "seconds": {"type": "number"},
+                        "x": {"type": "number", "minimum": 0, "maximum": 256},
+                        "y": {"type": "number", "minimum": 0, "maximum": 256},
+                        "seconds": {"type": "number", "minimum": 0, "maximum": 30},
                         "condition": {"type": "string"},
                         "target": {"type": "string"},
                         "at_least": {"type": "number"},
-                        "count": {"type": "integer"},
+                        "count": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_SELECTION_COUNT,
+                        },
                         "resource": {"type": "string"},
                         "building": {"type": "string"},
                         "worker": {"type": "string"},
-                        "workers": {"type": "integer"},
+                        "workers": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_WORKER_ASSIGNMENT_COUNT,
+                        },
                         "producer": {"type": "string"},
                         "addon": {"type": "string"},
                         "upgrade": {"type": "string"},
                         "mineral_to_gas_ratio": {"type": "number"},
+                        "ability": {"type": "string", "enum": list(ABILITY_SPECS)},
+                        "actor": {"type": "string"},
+                        "target_unit": {"type": "string"},
+                        "location": {"type": "string", "enum": list(LOCATION_SPECS)},
+                        "selection": {
+                            "type": "object",
+                            "properties": {
+                                "mode": {
+                                    "type": "string",
+                                    "enum": [
+                                        "all",
+                                        "ready",
+                                        "idle",
+                                        "closest",
+                                        "lowest_health",
+                                    ],
+                                },
+                                "count": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": MAX_SELECTION_COUNT,
+                                },
+                            },
+                        },
+                        "queued": {"type": "boolean"},
+                        "reason": {"type": "string", "maxLength": 500},
                     },
                     "required": ["type"],
                 },
@@ -250,34 +328,39 @@ def strategy_plan_json_schema() -> dict[str, Any]:
 
 def _build_gemini_prompt(request: PlannerRequest) -> str:
     game_state = (
-        game_state_summary_to_dict(request.game_state) if request.game_state is not None else None
+        game_state_summary_to_dict(request.game_state)
+        if request.game_state is not None
+        else None
     )
     return "\n".join(
         [
-            "You are the planner for a minimal StarCraft II bot.",
-            "Return only JSON matching this exact root shape: {\"actions\": [...]}. Do not use a different top-level key such as plan. Do not include markdown.",
+            "You are the planner for a bounded Terran standard-melee StarCraft II bot.",
+            'Return only JSON matching this exact root shape: {"actions": [...]}. Do not use a different top-level key such as plan. Do not include markdown.',
             "Available actions are exactly:",
-            "- move: {type:'move', unit:'worker'|'marine', x:number, y:number}",
-            "- attack move: {type:'attack', unit:'worker'|'marine', x:number, y:number}",
-            "- attack visible enemy: {type:'attack_enemy', unit:'marine'|'worker'}",
-            "- patrol: {type:'patrol', unit:string, x:number, y:number}",
-            "- hold/stop: {type:'hold'|'stop', unit:string}",
-            "- rally: {type:'rally', building:string, x:number, y:number}",
+            "- move/attack/patrol: {type:string, unit:string, location?:string, x?:number, y?:number, selection?:{mode:string,count?:integer}, queued?:boolean}",
+            "- attack visible enemy: {type:'attack_enemy', unit:string, selection?:object, queued?:boolean}",
+            "- hold/stop: {type:'hold'|'stop', unit:string, selection?:object, queued?:boolean}",
+            "- rally: {type:'rally', building:string, location?:string, x?:number, y?:number}",
             "- wait: {type:'wait', seconds:number}",
             "- wait until condition: {type:'wait_until', condition:'minerals'|'vespene'|'supply_left'|'supply_used'|'supply_cap'|'structure_count'|'structure_ready'|'structure_pending'|'unit_count'|'townhall_count'|'upgrade_complete'|'game_time', target?:string, at_least:number}",
             "- gather minerals / gather gas: {type:'gather', unit:'worker', resource:'minerals'|'vespene', workers?:integer}",
             "- distribute workers: {type:'distribute_workers', mineral_to_gas_ratio?:number}",
             "- train unit: {type:'train', unit:string, count?:integer}",
-            "- build structure: {type:'build', building:string, worker:'worker', count?:integer}",
+            "- build structure: {type:'build', building:string, worker:'worker', count?:integer, location?:string, x?:number, y?:number}",
             "- expand: {type:'expand', count?:integer}",
             "- build add-on: {type:'build_addon', addon:string, count?:integer}",
             "- morph command center: {type:'morph', building:'orbital_command'|'planetary_fortress'}",
             "- research upgrade: {type:'research', upgrade:string}",
             "- repair: {type:'repair', target:string, workers?:integer}",
+            "- use ability: {type:'use_ability', ability:string, actor?:string, target_unit?:string, location?:string, x?:number, y?:number, selection?:{mode:string,count?:integer}, queued?:boolean}",
+            "- wrappers: scan, call_down_mule, supply_drop, transform, lift, land, load, unload, cancel, salvage, build_nuke, launch_nuke, replan",
+            "Unit target selectors: " + ", ".join(TARGET_SELECTORS),
             build_command_prompt_section(),
             "Constraints:",
             "- Use only actions listed above.",
-            "- Keep plans short and never exceed 10 actions; use count fields instead of duplicates.",
+            f"- Keep plans short and never exceed {MAX_PLAN_ACTIONS} actions; structure counts cap at {MAX_STRUCTURE_ACTION_COUNT}, worker assignments at {MAX_WORKER_ASSIGNMENT_COUNT}, and train/selection counts at {MAX_SELECTION_COUNT}.",
+            "- For abilities, use only canonical ability keys, never raw AbilityId enum names; runtime get_available_abilities is authoritative for energy/cooldown/live availability.",
+            "- Use semantic locations from the catalog when possible; otherwise provide bounded x/y coordinates.",
             "- For early economy requests at game start, prefer train scv and gather minerals.",
             "- Use wait_until minerals before a build when current minerals are too low but the plan should wait rather than fail.",
             "- After build supply_depot, use wait_until structure_ready target supply_depot before build barracks.",
@@ -300,12 +383,18 @@ def _build_gemini_prompt(request: PlannerRequest) -> str:
 
 
 def _normalize_gemini_plan_payload(payload: Any) -> Any:
-    if isinstance(payload, dict) and "actions" not in payload and isinstance(payload.get("plan"), list):
+    if (
+        isinstance(payload, dict)
+        and "actions" not in payload
+        and isinstance(payload.get("plan"), list)
+    ):
         return {"actions": payload["plan"]}
     return payload
 
 
-def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float) -> dict[str, Any]:
+def _post_json(
+    url: str, headers: dict[str, str], payload: dict[str, Any], timeout: float
+) -> dict[str, Any]:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -313,7 +402,9 @@ def _post_json(url: str, headers: dict[str, str], payload: dict[str, Any], timeo
             response_body = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
-        raise PlannerError(f"Gemini API request failed with HTTP {exc.code}: {error_body}") from exc
+        raise PlannerError(
+            f"Gemini API request failed with HTTP {exc.code}: {error_body}"
+        ) from exc
     except urllib.error.URLError as exc:
         raise PlannerError(f"Gemini API request failed: {exc.reason}") from exc
 
@@ -340,4 +431,6 @@ def _extract_gemini_output_text(response_payload: dict[str, Any]) -> str:
     if joined:
         return joined
 
-    raise PlannerError("Gemini API response did not contain output_text or model_output text")
+    raise PlannerError(
+        "Gemini API response did not contain output_text or model_output text"
+    )
