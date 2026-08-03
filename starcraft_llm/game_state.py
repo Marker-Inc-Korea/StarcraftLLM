@@ -37,6 +37,15 @@ class UnitObservation:
     is_idle: bool | None = None
     cargo_used: int | None = None
     cargo_max: int | None = None
+    add_on_tag: int | str | None = None
+    passenger_tags: tuple[int | str, ...] = ()
+    passenger_units: tuple[str, ...] = ()
+    is_biological: bool | None = None
+    is_mechanical: bool | None = None
+    is_psionic: bool | None = None
+    is_massive: bool | None = None
+    is_detector: bool | None = None
+    weapon_cooldown: float | None = None
     orders: tuple[str, ...] = ()
 
 
@@ -127,6 +136,13 @@ def _unit_observation_to_dict(observation: UnitObservation) -> dict[str, Any]:
         "is_idle",
         "cargo_used",
         "cargo_max",
+        "add_on_tag",
+        "is_biological",
+        "is_mechanical",
+        "is_psionic",
+        "is_massive",
+        "is_detector",
+        "weapon_cooldown",
     )
     for field_name in optional_fields:
         value = getattr(observation, field_name)
@@ -134,6 +150,10 @@ def _unit_observation_to_dict(observation: UnitObservation) -> dict[str, Any]:
             result[field_name] = value
     if observation.orders:
         result["orders"] = list(observation.orders)
+    if observation.passenger_tags:
+        result["passenger_tags"] = list(observation.passenger_tags)
+    if observation.passenger_units:
+        result["passenger_units"] = list(observation.passenger_units)
     return result
 
 

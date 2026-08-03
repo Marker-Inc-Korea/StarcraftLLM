@@ -28,7 +28,6 @@ from starcraft_llm.command_catalog import (
     SALVAGEABLE_STRUCTURE_KEYS,
     SPECIAL_UNIT_SPECS,
     STRUCTURE_SPECS,
-    TARGET_SELECTORS,
     TRANSFORM_ABILITY_KEYS,
     TRANSPORT_ACTOR_KEYS,
     UNIT_SPECS,
@@ -69,6 +68,23 @@ def move(
     )
 
 
+def move_target(
+    unit: str,
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command(
+        "move_target",
+        unit=unit,
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+    )
+
+
 def attack_move(
     unit: str,
     x: Optional[float] = None,
@@ -92,8 +108,34 @@ def attack_enemy(
     unit: str = "marine",
     selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
 ) -> StrategyAction:
-    return _command("attack_enemy", unit=unit, selection=selection, queued=queued)
+    return _command(
+        "attack_enemy",
+        unit=unit,
+        selection=selection,
+        queued=queued,
+        target_unit=target_unit,
+        target_tag=target_tag,
+    )
+
+
+def attack_target(
+    unit: str = "marine",
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command(
+        "attack_target",
+        unit=unit,
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+    )
 
 
 def patrol(
@@ -136,6 +178,8 @@ def rally(
     x: Optional[float] = None,
     y: Optional[float] = None,
     location: Optional[str] = None,
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
     selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
@@ -145,6 +189,8 @@ def rally(
         x=x,
         y=y,
         location=location,
+        target_unit=target_unit,
+        target_tag=target_tag,
         selection=selection,
         queued=queued,
     )
@@ -160,16 +206,50 @@ def wait_until(
     return _command("wait_until", condition=condition, at_least=at_least, target=target)
 
 
-def gather(resource: str, workers: Optional[int] = None) -> StrategyAction:
-    return _command("gather", unit="worker", resource=resource, workers=workers)
+def gather(
+    resource: str,
+    workers: Optional[int] = None,
+    location: Optional[str] = None,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command(
+        "gather",
+        unit="worker",
+        resource=resource,
+        workers=workers,
+        location=location,
+        x=x,
+        y=y,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+    )
+
+
+def return_cargo(
+    unit: str = "worker",
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command("return_cargo", unit=unit, selection=selection, queued=queued)
 
 
 def distribute_workers(mineral_to_gas_ratio: float = 2) -> StrategyAction:
     return _command("distribute_workers", mineral_to_gas_ratio=mineral_to_gas_ratio)
 
 
-def train(unit: str, count: int = 1) -> StrategyAction:
-    return _command("train", unit=unit, count=count)
+def train(
+    unit: str,
+    count: int = 1,
+    producer_selection: Optional[Mapping[str, Any]] = None,
+) -> StrategyAction:
+    return _command(
+        "train", unit=unit, count=count, producer_selection=producer_selection
+    )
 
 
 def build(
@@ -179,6 +259,9 @@ def build(
     x: Optional[float] = None,
     y: Optional[float] = None,
     selection: Optional[Mapping[str, Any]] = None,
+    placement_mode: Optional[str] = None,
+    max_distance: Optional[int] = None,
+    reserve_addon_space: bool = False,
 ) -> StrategyAction:
     return _command(
         "build",
@@ -189,6 +272,9 @@ def build(
         x=x,
         y=y,
         selection=selection,
+        placement_mode=placement_mode,
+        max_distance=max_distance,
+        reserve_addon_space=reserve_addon_space,
     )
 
 
@@ -197,27 +283,54 @@ def expand(count: int = 1) -> StrategyAction:
 
 
 def build_addon(
-    addon: str, count: int = 1, producer: Optional[str] = None
+    addon: str,
+    count: int = 1,
+    producer: Optional[str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
 ) -> StrategyAction:
-    return _command("build_addon", addon=addon, producer=producer, count=count)
+    return _command(
+        "build_addon", addon=addon, producer=producer, count=count, selection=selection
+    )
 
 
-def morph(building: str) -> StrategyAction:
-    return _command("morph", building=building)
+def morph(
+    building: str, selection: Optional[Mapping[str, Any]] = None
+) -> StrategyAction:
+    return _command("morph", building=building, selection=selection)
 
 
-def research(upgrade: str) -> StrategyAction:
-    return _command("research", upgrade=upgrade)
+def research(
+    upgrade: str, researcher_selection: Optional[Mapping[str, Any]] = None
+) -> StrategyAction:
+    return _command(
+        "research", upgrade=upgrade, researcher_selection=researcher_selection
+    )
 
 
-def repair(target: str, workers: int = 1) -> StrategyAction:
-    return _command("repair", target=target, workers=workers)
+def repair(
+    target: Optional[str] = None,
+    workers: int = 1,
+    target_tag: Optional[int | str] = None,
+    target_selector: Optional[str] = None,
+    target_selection: Optional[Mapping[str, Any]] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+) -> StrategyAction:
+    return _command(
+        "repair",
+        target=target,
+        workers=workers,
+        target_tag=target_tag,
+        target_selector=target_selector,
+        target_selection=target_selection,
+        selection=selection,
+    )
 
 
 def use_ability(
     ability: str,
     actor: Optional[str] = None,
     target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
@@ -229,6 +342,7 @@ def use_ability(
         ability=ability,
         actor=actor,
         target_unit=target_unit,
+        target_tag=target_tag,
         location=location,
         x=x,
         y=y,
@@ -241,34 +355,63 @@ def scan(
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
-    return _command("scan", location=location, x=x, y=y, queued=queued)
+    return _command(
+        "scan", location=location, x=x, y=y, selection=selection, queued=queued
+    )
 
 
 def call_down_mule(
     location: Optional[str] = "nearest_mineral",
     x: Optional[float] = None,
     y: Optional[float] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
-    return _command("call_down_mule", location=location, x=x, y=y, queued=queued)
+    return _command(
+        "call_down_mule",
+        location=location,
+        x=x,
+        y=y,
+        selection=selection,
+        queued=queued,
+    )
 
 
 def supply_drop(
-    target_unit: str = "supply_depot", queued: bool = False
+    target_unit: str = "supply_depot",
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
 ) -> StrategyAction:
-    return _command("supply_drop", target_unit=target_unit, queued=queued)
+    return _command(
+        "supply_drop",
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+    )
 
 
 def transform(
-    ability: str, actor: Optional[str] = None, queued: bool = False
+    ability: str,
+    actor: Optional[str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
 ) -> StrategyAction:
-    return _command("transform", ability=ability, actor=actor, queued=queued)
+    return _command(
+        "transform", ability=ability, actor=actor, selection=selection, queued=queued
+    )
 
 
-def lift(actor: str, queued: bool = False) -> StrategyAction:
-    return _command("lift", actor=actor, queued=queued)
+def lift(
+    actor: str,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command("lift", actor=actor, selection=selection, queued=queued)
 
 
 def land(
@@ -276,14 +419,46 @@ def land(
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
+    target_addon: Optional[str] = None,
+    target_addon_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
-    return _command("land", actor=actor, location=location, x=x, y=y, queued=queued)
+    return _command(
+        "land",
+        actor=actor,
+        location=location,
+        x=x,
+        y=y,
+        target_addon=target_addon,
+        target_addon_tag=target_addon_tag,
+        selection=selection,
+        queued=queued,
+    )
+
+
+def land_on_addon(
+    actor: str,
+    target_addon: Optional[str] = None,
+    target_addon_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command(
+        "land_on_addon",
+        actor=actor,
+        target_addon=target_addon,
+        target_addon_tag=target_addon_tag,
+        selection=selection,
+        queued=queued,
+    )
 
 
 def load(
     actor: str,
     target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
+    target_selection: Optional[Mapping[str, Any]] = None,
     count: Optional[int] = None,
     selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
@@ -292,6 +467,8 @@ def load(
         "load",
         actor=actor,
         target_unit=target_unit,
+        target_tag=target_tag,
+        target_selection=target_selection,
         count=count,
         selection=selection,
         queued=queued,
@@ -301,18 +478,22 @@ def load(
 def unload(
     actor: str,
     target_unit: Optional[str] = None,
+    passenger_tag: Optional[int | str] = None,
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
     return _command(
         "unload",
         actor=actor,
         target_unit=target_unit,
+        passenger_tag=passenger_tag,
         location=location,
         x=x,
         y=y,
+        selection=selection,
         queued=queued,
     )
 
@@ -321,6 +502,7 @@ def cancel(
     ability: str = "cancel_any",
     actor: Optional[str] = None,
     target: Optional[str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
     return _command(
@@ -328,25 +510,35 @@ def cancel(
         ability=ability if target is None else None,
         target=target,
         actor=actor,
+        selection=selection,
         queued=queued,
     )
 
 
-def salvage(actor: str, queued: bool = False) -> StrategyAction:
-    return _command("salvage", actor=actor, queued=queued)
+def salvage(
+    actor: str,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+) -> StrategyAction:
+    return _command("salvage", actor=actor, selection=selection, queued=queued)
 
 
-def build_nuke(queued: bool = False) -> StrategyAction:
-    return _command("build_nuke", queued=queued)
+def build_nuke(
+    selection: Optional[Mapping[str, Any]] = None, queued: bool = False
+) -> StrategyAction:
+    return _command("build_nuke", selection=selection, queued=queued)
 
 
 def launch_nuke(
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
+    selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
-    return _command("launch_nuke", location=location, x=x, y=y, queued=queued)
+    return _command(
+        "launch_nuke", location=location, x=x, y=y, selection=selection, queued=queued
+    )
 
 
 def replan(reason: str = "requested") -> StrategyAction:
@@ -402,8 +594,10 @@ def strategy_plan_from_function_calls(
 LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProxyType(
     {
         "move": move,
+        "move_target": move_target,
         "attack_move": attack_move,
         "attack_enemy": attack_enemy,
+        "attack_target": attack_target,
         "patrol": patrol,
         "hold_position": hold_position,
         "stop": stop,
@@ -411,6 +605,7 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
         "wait": wait,
         "wait_until": wait_until,
         "gather": gather,
+        "return_cargo": return_cargo,
         "distribute_workers": distribute_workers,
         "train": train,
         "build": build,
@@ -426,6 +621,7 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
         "transform": transform,
         "lift": lift,
         "land": land,
+        "land_on_addon": land_on_addon,
         "load": load,
         "unload": unload,
         "cancel": cancel,
@@ -455,6 +651,41 @@ def _point_target_schema(
     schema["anyOf"] = [
         {"required": ["location"]},
         {"required": ["x", "y"]},
+    ]
+    return schema
+
+
+def _one_target_schema(
+    properties: dict[str, dict[str, Any]],
+    target_fields: Tuple[str, ...],
+    required: Tuple[str, ...] = (),
+) -> dict[str, Any]:
+    schema = _object_schema(properties, required)
+    schema["anyOf"] = [{"required": [field]} for field in target_fields]
+    return schema
+
+
+def _target_choice_schema(
+    properties: dict[str, dict[str, Any]],
+    target_options: Tuple[Tuple[str, ...], ...],
+    required: Tuple[str, ...] = (),
+) -> dict[str, Any]:
+    schema = _object_schema(properties, required)
+    schema["anyOf"] = [
+        {"required": list(target_fields)} for target_fields in target_options
+    ]
+    return schema
+
+
+def _build_placement_schema(
+    properties: dict[str, dict[str, Any]], required: Tuple[str, ...] = ()
+) -> dict[str, Any]:
+    schema = _object_schema(properties, required)
+    exact_count = {"properties": {"count": {"maximum": 1}}}
+    schema["anyOf"] = [
+        {"properties": {"placement_mode": {"enum": ["near"]}}},
+        {"required": ["location"], **exact_count},
+        {"required": ["x", "y"], **exact_count},
     ]
     return schema
 
@@ -496,6 +727,12 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         "maximum": MAX_SELECTION_COUNT,
     }
     train_count = dict(selection_count)
+    tag: dict[str, Any] = {
+        "anyOf": [
+            {"type": "integer", "minimum": 1},
+            {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        ]
+    }
     point: dict[str, dict[str, Any]] = {"x": safe_coordinate, "y": safe_coordinate}
     location: dict[str, Any] = {"type": "string", "enum": list(LOCATION_SPECS)}
     attack_unit: dict[str, Any] = {
@@ -539,30 +776,101 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         {
             "mode": {
                 "type": "string",
-                "enum": ["all", "ready", "idle", "closest", "lowest_health"],
+                "enum": [
+                    "all",
+                    "ready",
+                    "idle",
+                    "closest",
+                    "lowest_health",
+                    "highest_energy",
+                ],
             },
             "count": selection_count,
+            "tags": {
+                "type": "array",
+                "items": tag,
+                "minItems": 1,
+                "maxItems": MAX_SELECTION_COUNT,
+                "uniqueItems": True,
+            },
         }
     )
-    target_unit: dict[str, Any] = {
+    ability_target_unit: dict[str, Any] = {
+        "type": "string",
+        "pattern": "^[a-z0-9_]{1,64}$",
+        "description": (
+            "A target selector, canonical friendly type, or normalized observed "
+            "enemy unit/structure type such as zergling, carrier, or hatchery."
+        ),
+    }
+    enemy_target: dict[str, Any] = {
+        "type": "string",
+        "pattern": "^[a-z0-9_]{1,64}$",
+        "description": (
+            "An enemy selector such as nearest_enemy_air/lowest_health_enemy, "
+            "or an observed normalized enemy unit type such as zergling or carrier."
+        ),
+    }
+    rally_target: dict[str, Any] = {
         "type": "string",
         "enum": list(
             dict.fromkeys(
                 (
-                    *TARGET_SELECTORS,
+                    "nearest_mineral",
+                    "nearest_friendly",
+                    "damaged_friendly",
+                    "lowest_health_friendly",
+                    "highest_energy_friendly",
+                    "any_friendly",
                     *movable_unit_enum,
                     *structure_enum,
-                    *ADDON_SPECS,
                     *MORPH_SPECS,
                 )
             )
         ),
+    }
+    friendly_move_target: dict[str, Any] = {
+        "type": "string",
+        "enum": list(
+            dict.fromkeys(
+                (
+                    "nearest_friendly",
+                    "damaged_friendly",
+                    "lowest_health_friendly",
+                    "highest_energy_friendly",
+                    "any_friendly",
+                    *movable_unit_enum,
+                    *structure_enum,
+                    *MORPH_SPECS,
+                )
+            )
+        ),
+    }
+    friendly_target_selector: dict[str, Any] = {
+        "type": "string",
+        "enum": [
+            "nearest_friendly",
+            "damaged_friendly",
+            "lowest_health_friendly",
+            "any_friendly",
+        ],
+    }
+    production_flying_actor: dict[str, Any] = {
+        "type": "string",
+        "enum": ["barracks", "factory", "starport"],
     }
     loadable_unit: dict[str, Any] = {
         "type": "string",
         "enum": list(
             dict.fromkeys((*BUNKER_LOADABLE_UNIT_KEYS, *MEDIVAC_LOADABLE_UNIT_KEYS))
         ),
+    }
+    addon_target: dict[str, Any] = {"type": "string", "enum": list(ADDON_SPECS)}
+    placement_mode: dict[str, Any] = {"type": "string", "enum": ["near", "exact"]}
+    max_distance: dict[str, Any] = {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 20,
     }
     queued: dict[str, Any] = {"type": "boolean"}
     point_order: dict[str, dict[str, Any]] = {
@@ -579,15 +887,51 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             _point_target_schema({"unit": movable_unit, **point_order}, ("unit",)),
         ),
         _function(
+            "move_target",
+            "Move or follow a specific visible friendly unit by selector/type or runtime unit tag.",
+            _one_target_schema(
+                {
+                    "unit": movable_unit,
+                    "target_unit": friendly_move_target,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "queued": queued,
+                },
+                ("target_unit", "target_tag"),
+                ("unit",),
+            ),
+        ),
+        _function(
             "attack_move",
             "Attack-move a bounded Terran unit group to coordinates or a semantic location.",
             _point_target_schema({"unit": attack_unit, **point_order}, ("unit",)),
         ),
         _function(
             "attack_enemy",
-            "Attack the nearest visible enemy.",
+            "Attack the nearest visible enemy, or a specific enemy when target_unit/target_tag is provided.",
             _object_schema(
-                {"unit": attack_unit, "selection": selection, "queued": queued},
+                {
+                    "unit": attack_unit,
+                    "target_unit": enemy_target,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "queued": queued,
+                },
+                ("unit",),
+            ),
+        ),
+        _function(
+            "attack_target",
+            "Attack a specific visible enemy by selector/type or runtime unit tag.",
+            _one_target_schema(
+                {
+                    "unit": attack_unit,
+                    "target_unit": enemy_target,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "queued": queued,
+                },
+                ("target_unit", "target_tag"),
                 ("unit",),
             ),
         ),
@@ -614,8 +958,8 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "rally",
-            "Set a production structure rally point.",
-            _point_target_schema(
+            "Set a production structure rally point to a point or visible unit tag/selector.",
+            _target_choice_schema(
                 {
                     "building": {
                         "type": "string",
@@ -629,7 +973,10 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                         ],
                     },
                     **point_order,
+                    "target_unit": rally_target,
+                    "target_tag": tag,
                 },
+                (("location",), ("x", "y"), ("target_unit",), ("target_tag",)),
                 ("building",),
             ),
         ),
@@ -671,13 +1018,29 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "gather",
-            "Assign workers to minerals or vespene.",
+            "Assign selected workers to minerals or vespene by resource type, location, or target tag.",
             _object_schema(
                 {
                     "resource": {"type": "string", "enum": ["minerals", "vespene"]},
                     "workers": worker_count,
+                    "location": location,
+                    **point,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "queued": queued,
                 },
                 ("resource",),
+            ),
+        ),
+        _function(
+            "return_cargo",
+            "Return carried resources from selected workers or MULEs.",
+            _object_schema(
+                {
+                    "unit": {"type": "string", "enum": ["worker", "mule"]},
+                    "selection": selection,
+                    "queued": queued,
+                }
             ),
         ),
         _function(
@@ -700,6 +1063,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "unit": {"type": "string", "enum": list(UNIT_SPECS)},
                     "count": train_count,
+                    "producer_selection": selection,
                 },
                 ("unit",),
             ),
@@ -707,13 +1071,16 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         _function(
             "build",
             "Build any standard Terran structure at an optional semantic location or coordinates.",
-            _object_schema(
+            _build_placement_schema(
                 {
                     "building": {"type": "string", "enum": structure_enum},
                     "count": structure_count,
                     "location": location,
                     **point,
                     "selection": selection,
+                    "placement_mode": placement_mode,
+                    "max_distance": max_distance,
+                    "reserve_addon_space": {"type": "boolean"},
                 },
                 ("building",),
             ),
@@ -730,6 +1097,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "addon": {"type": "string", "enum": list(ADDON_SPECS)},
                     "count": structure_count,
+                    "selection": selection,
                 },
                 ("addon",),
             ),
@@ -738,7 +1106,10 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "morph",
             "Morph a command center into an Orbital Command or Planetary Fortress.",
             _object_schema(
-                {"building": {"type": "string", "enum": list(MORPH_SPECS)}},
+                {
+                    "building": {"type": "string", "enum": list(MORPH_SPECS)},
+                    "selection": selection,
+                },
                 ("building",),
             ),
         ),
@@ -746,19 +1117,26 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "research",
             "Research a supported Terran upgrade.",
             _object_schema(
-                {"upgrade": {"type": "string", "enum": list(UPGRADE_SPECS)}},
+                {
+                    "upgrade": {"type": "string", "enum": list(UPGRADE_SPECS)},
+                    "researcher_selection": selection,
+                },
                 ("upgrade",),
             ),
         ),
         _function(
             "repair",
-            "Assign SCVs to repair a Terran unit or structure.",
-            _object_schema(
+            "Assign SCVs to repair a Terran unit or structure by type, selector, or runtime tag.",
+            _one_target_schema(
                 {
                     "target": {"type": "string", "enum": repair_enum},
+                    "target_tag": tag,
+                    "target_selector": friendly_target_selector,
+                    "target_selection": selection,
                     "workers": worker_count,
+                    "selection": selection,
                 },
-                ("target",),
+                ("target", "target_tag", "target_selector"),
             ),
         ),
         _function(
@@ -768,7 +1146,8 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "ability": ability,
                     "actor": actor,
-                    "target_unit": target_unit,
+                    "target_unit": ability_target_unit,
+                    "target_tag": tag,
                     "location": location,
                     **point,
                     "selection": selection,
@@ -780,15 +1159,25 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         _function(
             "scan",
             "Scanner sweep a semantic location or coordinates.",
-            _object_schema(
-                {"location": location, **point, "queued": {"type": "boolean"}}
+            _point_target_schema(
+                {
+                    "location": location,
+                    **point,
+                    "selection": selection,
+                    "queued": {"type": "boolean"},
+                }
             ),
         ),
         _function(
             "call_down_mule",
             "Call down a MULE near minerals.",
             _object_schema(
-                {"location": location, **point, "queued": {"type": "boolean"}}
+                {
+                    "location": location,
+                    **point,
+                    "selection": selection,
+                    "queued": {"type": "boolean"},
+                }
             ),
         ),
         _function(
@@ -797,6 +1186,8 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             _object_schema(
                 {
                     "target_unit": {"type": "string", "enum": ["supply_depot"]},
+                    "target_tag": tag,
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 }
             ),
@@ -808,6 +1199,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "ability": transform_ability,
                     "actor": actor,
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 },
                 ("ability",),
@@ -817,20 +1209,40 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "lift",
             "Lift a supported Terran structure.",
             _object_schema(
-                {"actor": liftable_actor, "queued": {"type": "boolean"}},
+                {
+                    "actor": liftable_actor,
+                    "selection": selection,
+                    "queued": {"type": "boolean"},
+                },
                 ("actor",),
             ),
         ),
         _function(
             "land",
             "Land a supported flying Terran structure.",
-            _object_schema(
+            _point_target_schema(
                 {
                     "actor": liftable_actor,
                     "location": location,
                     **point,
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 },
+                ("actor",),
+            ),
+        ),
+        _function(
+            "land_on_addon",
+            "Land a supported flying production structure on a specific add-on by type or runtime tag.",
+            _one_target_schema(
+                {
+                    "actor": production_flying_actor,
+                    "target_addon": addon_target,
+                    "target_addon_tag": tag,
+                    "selection": selection,
+                    "queued": {"type": "boolean"},
+                },
+                ("target_addon", "target_addon_tag"),
                 ("actor",),
             ),
         ),
@@ -841,6 +1253,8 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "actor": transport_actor,
                     "target_unit": loadable_unit,
+                    "target_tag": tag,
+                    "target_selection": selection,
                     "count": selection_count,
                     "selection": selection,
                     "queued": queued,
@@ -855,8 +1269,10 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                 {
                     "actor": transport_actor,
                     "target_unit": loadable_unit,
+                    "passenger_tag": tag,
                     "location": location,
                     **point,
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 },
                 ("actor",),
@@ -870,6 +1286,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                     "ability": {"type": "string", "enum": cancel_abilities},
                     "target": {"type": "string", "enum": cancel_targets},
                     "actor": actor,
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 }
             ),
@@ -883,6 +1300,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                         "type": "string",
                         "enum": list(SALVAGEABLE_STRUCTURE_KEYS),
                     },
+                    "selection": selection,
                     "queued": {"type": "boolean"},
                 },
                 ("actor",),
@@ -891,13 +1309,18 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         _function(
             "build_nuke",
             "Build a tactical nuke at a Ghost Academy.",
-            _object_schema({"queued": {"type": "boolean"}}),
+            _object_schema({"selection": selection, "queued": {"type": "boolean"}}),
         ),
         _function(
             "launch_nuke",
             "Launch a tactical nuke at a semantic location or coordinates.",
-            _object_schema(
-                {"location": location, **point, "queued": {"type": "boolean"}}
+            _point_target_schema(
+                {
+                    "location": location,
+                    **point,
+                    "selection": selection,
+                    "queued": {"type": "boolean"},
+                }
             ),
         ),
         _function(
@@ -912,6 +1335,7 @@ __all__ = (
     "LLM_COMMAND_FUNCTIONS",
     "attack_enemy",
     "attack_move",
+    "attack_target",
     "build",
     "build_addon",
     "create_plan",
@@ -922,14 +1346,17 @@ __all__ = (
     "llm_command_function_schemas",
     "morph",
     "move",
+    "move_target",
     "patrol",
     "rally",
     "repair",
     "research",
+    "return_cargo",
     "build_nuke",
     "call_down_mule",
     "cancel",
     "land",
+    "land_on_addon",
     "launch_nuke",
     "lift",
     "load",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable, cast
 
@@ -50,6 +51,7 @@ from starcraft_llm.strategy import (
     RepairCommand,
     ReplanCommand,
     ResearchUpgradeCommand,
+    ReturnCargoCommand,
     StopCommand,
     StrategyPlan,
     TrainUnitCommand,
@@ -86,6 +88,16 @@ MAX_REPLANS = MAX_REPLAN_CYCLES
 
 _LOCATION_KEYS = frozenset(LOCATION_SPECS)
 _ABILITY_SPECS = ABILITY_SPECS
+_KNOWN_ABILITY_TARGET_KEYS = frozenset(
+    {
+        "worker",
+        *UNIT_SPECS,
+        *SPECIAL_UNIT_SPECS,
+        *STRUCTURE_SPECS,
+        *ADDON_SPECS,
+        *MORPH_SPECS,
+    }
+)
 
 
 @dataclass
@@ -236,15 +248,7 @@ def validate_strategy_plan(
     state = _PlanState.from_summary(game_state)
     for index, action in enumerate(plan.actions, start=1):
         if isinstance(action, MoveCommand):
-            _validate_point_action(
-                action,
-                action.unit,
-                index,
-                state,
-                "move",
-                min_coordinate,
-                max_coordinate,
-            )
+            _validate_move(action, index, state, min_coordinate, max_coordinate)
         elif isinstance(action, AttackMoveCommand):
             _validate_point_action(
                 action,
@@ -258,6 +262,7 @@ def validate_strategy_plan(
         elif isinstance(action, AttackEnemyCommand):
             _validate_unit(action.unit, index, "attack enemy")
             _validate_selection(action.selection, index)
+            _validate_attack_target(action, index)
             _validate_queued(action, index)
         elif isinstance(action, PatrolCommand):
             _validate_point_action(
@@ -284,9 +289,15 @@ def validate_strategy_plan(
         elif isinstance(action, WaitUntilCommand):
             _validate_wait_until(action, index, state)
         elif isinstance(action, GatherMineralsCommand):
-            _validate_gather(action.unit, action.workers, index, state, "minerals")
+            _validate_gather(
+                action, index, state, "minerals", min_coordinate, max_coordinate
+            )
         elif isinstance(action, GatherGasCommand):
-            _validate_gather(action.unit, action.workers, index, state, "gas")
+            _validate_gather(
+                action, index, state, "gas", min_coordinate, max_coordinate
+            )
+        elif isinstance(action, ReturnCargoCommand):
+            _validate_return_cargo(action, index, state)
         elif isinstance(action, DistributeWorkersCommand):
             _validate_distribute_workers(action, index, state)
         elif isinstance(action, TrainUnitCommand):
@@ -337,6 +348,85 @@ def _validate_point_action(
         min_coordinate,
         max_coordinate,
     )
+
+
+def _validate_move(
+    action: MoveCommand,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+) -> None:
+    _validate_unit(action.unit, index, "move")
+    _validate_selection(action.selection, index)
+    _validate_queued(action, index)
+    target_unit = getattr(action, "target_unit", None)
+    target_tag = getattr(action, "target_tag", None)
+    has_unit_target = target_unit is not None or target_tag is not None
+    has_point_target = _has_point_target(action)
+    if has_unit_target and has_point_target:
+        raise PlanValidationError(
+            f"action {index}: move must target a point or a friendly unit, not both"
+        )
+    if not has_unit_target:
+        _validate_location_or_point(
+            action,
+            index,
+            state,
+            "move",
+            min_coordinate,
+            max_coordinate,
+        )
+        return
+    if target_tag is not None:
+        _validate_tag(target_tag, index, "move target")
+    if target_unit is None:
+        return
+    target_key = normalize_name(str(target_unit))
+    friendly_selectors = {
+        "nearest_friendly",
+        "damaged_friendly",
+        "lowest_health_friendly",
+        "highest_energy_friendly",
+        "any_friendly",
+    }
+    if target_key in TARGET_SELECTORS:
+        if target_key not in friendly_selectors:
+            raise PlanValidationError(
+                f"action {index}: move target selector must select a friendly unit: {target_key}"
+            )
+        return
+    try:
+        resolve_alias(
+            target_key,
+            categories=("unit", "special_unit", "structure", "morph"),
+        )
+    except KeyError as exc:
+        raise PlanValidationError(
+            f"action {index}: unsupported friendly move target: {target_key}"
+        ) from exc
+
+
+def _validate_attack_target(action: AttackEnemyCommand, index: int) -> None:
+    target_tag = getattr(action, "target_tag", None)
+    target_unit = getattr(action, "target_unit", None)
+    if target_tag is not None:
+        _validate_tag(target_tag, index, "attack target")
+    if target_unit is None:
+        return
+    target_key = normalize_name(str(target_unit))
+    if target_key in TARGET_SELECTORS:
+        if not target_key.startswith("nearest_enemy") and not target_key.endswith(
+            "_enemy"
+        ):
+            raise PlanValidationError(
+                f"action {index}: attack target selector must select an enemy: {target_key}"
+            )
+        return
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", target_key):
+        raise PlanValidationError(
+            f"action {index}: invalid enemy unit type target: {target_unit}"
+        )
 
 
 def _validate_point(
@@ -498,10 +588,35 @@ def _validate_wait_until(
 
 
 def _validate_gather(
-    unit: str, worker_count: int | None, index: int, state: _PlanState, resource: str
+    action: GatherMineralsCommand | GatherGasCommand,
+    index: int,
+    state: _PlanState,
+    resource: str,
+    min_coordinate: float,
+    max_coordinate: float,
 ) -> None:
+    unit = action.unit
+    worker_count = action.workers
     if unit != "worker":
         raise PlanValidationError(f"action {index}: only workers can gather {resource}")
+    _validate_selection(getattr(action, "selection", None), index)
+    _validate_queued(action, index)
+    target_tag = getattr(action, "target_tag", None)
+    if target_tag is not None:
+        _validate_tag(target_tag, index, f"{resource} target")
+    if getattr(action, "location", None) is not None:
+        if target_tag is not None:
+            raise PlanValidationError(
+                f"action {index}: gather {resource} must target a tag or a location, not both"
+            )
+        _validate_location_or_point(
+            action,
+            index,
+            state,
+            f"gather {resource}",
+            min_coordinate,
+            max_coordinate,
+        )
     if worker_count is not None and not 1 <= worker_count <= MAX_WORKER_COUNT:
         raise PlanValidationError(
             f"action {index}: gather worker count must be between 1 and {MAX_WORKER_COUNT}"
@@ -522,6 +637,25 @@ def _validate_gather(
         raise PlanValidationError(
             f"action {index}: cannot gather gas without a ready refinery"
         )
+
+
+def _validate_return_cargo(
+    action: ReturnCargoCommand, index: int, state: _PlanState
+) -> None:
+    if action.unit not in {"worker", "mule"}:
+        raise PlanValidationError(
+            f"action {index}: only workers or MULEs can return cargo"
+        )
+    _validate_selection(action.selection, index)
+    _validate_queued(action, index)
+    if state.known:
+        exists = (
+            state.workers if action.unit == "worker" else state.units.get("mule", 0)
+        )
+        if exists < 1:
+            raise PlanValidationError(
+                f"action {index}: cannot return cargo without a {action.unit}"
+            )
 
 
 def _validate_distribute_workers(
@@ -546,6 +680,7 @@ def _validate_train(action: TrainUnitCommand, index: int, state: _PlanState) -> 
     _validate_count(
         action.count, index, "train", max_count=MAX_TRAIN_OR_SELECTION_COUNT
     )
+    _validate_selection(getattr(action, "producer_selection", None), index)
     spec = UNIT_SPECS[action.unit]
     action_name = f"train {action.count} {action.unit}"
 
@@ -597,6 +732,41 @@ def _validate_build(
         )
     _validate_count(action.count, index, "build")
     _validate_selection(action.selection, index)
+    placement_mode = normalize_name(str(getattr(action, "placement_mode", "near")))
+    if placement_mode not in {"near", "exact"}:
+        raise PlanValidationError(
+            f"action {index}: unsupported build placement mode: {placement_mode}"
+        )
+    max_distance = getattr(action, "max_distance", 20)
+    if isinstance(max_distance, bool) or not isinstance(max_distance, int):
+        raise PlanValidationError(
+            f"action {index}: build max_distance must be an integer"
+        )
+    if not 0 <= max_distance <= 20:
+        raise PlanValidationError(
+            f"action {index}: build max_distance must be between 0 and 20"
+        )
+    if placement_mode == "exact" and action.location is None:
+        raise PlanValidationError(
+            f"action {index}: exact build placement requires a semantic location or x/y coordinates"
+        )
+    if placement_mode == "exact" and action.count != 1:
+        raise PlanValidationError(
+            f"action {index}: exact build placement supports one structure per action"
+        )
+    reserve_addon_space = getattr(action, "reserve_addon_space", False)
+    if not isinstance(reserve_addon_space, bool):
+        raise PlanValidationError(
+            f"action {index}: reserve_addon_space must be boolean"
+        )
+    if reserve_addon_space and action.building not in {
+        "barracks",
+        "factory",
+        "starport",
+    }:
+        raise PlanValidationError(
+            f"action {index}: only barracks, factory, or starport can reserve add-on space"
+        )
     if action.location is not None:
         _validate_location_or_point(
             action,
@@ -637,6 +807,7 @@ def _validate_addon(action: BuildAddonCommand, index: int, state: _PlanState) ->
             f"action {index}: unsupported build add-on: {action.addon}"
         )
     _validate_count(action.count, index, "add-on")
+    _validate_selection(getattr(action, "selection", None), index)
     spec = ADDON_SPECS[action.addon]
     producer = spec.producer or ""
     state.require_ready(producer, index, f"build {action.addon}")
@@ -661,6 +832,7 @@ def _validate_morph(
         raise PlanValidationError(
             f"action {index}: unsupported structure morph: {action.building}"
         )
+    _validate_selection(getattr(action, "selection", None), index)
     spec = MORPH_SPECS[action.building]
     state.require_ready("command_center", index, f"morph {action.building}")
     for prerequisite in spec.prerequisites:
@@ -684,6 +856,7 @@ def _validate_research(
         raise PlanValidationError(
             f"action {index}: unsupported Terran upgrade: {action.upgrade}"
         )
+    _validate_selection(getattr(action, "researcher_selection", None), index)
     spec = UPGRADE_SPECS[action.upgrade]
     if action.upgrade in state.upgrades or action.upgrade in state.upgrades_planned:
         raise PlanValidationError(
@@ -707,7 +880,28 @@ def _validate_research(
 
 def _validate_repair(action: RepairCommand, index: int, state: _PlanState) -> None:
     _validate_count(action.workers, index, "repair worker", max_count=MAX_WORKER_COUNT)
-    if action.target not in REPAIRABLE_TARGET_KEYS:
+    _validate_selection(getattr(action, "selection", None), index)
+    _validate_selection(getattr(action, "target_selection", None), index)
+    target_tag = getattr(action, "target_tag", None)
+    if target_tag is not None:
+        _validate_tag(target_tag, index, "repair target")
+    target_selector = getattr(action, "target_selector", None)
+    if target_selector is not None:
+        selector_key = normalize_name(str(target_selector))
+        if selector_key not in {
+            "nearest_friendly",
+            "damaged_friendly",
+            "lowest_health_friendly",
+            "any_friendly",
+        }:
+            raise PlanValidationError(
+                f"action {index}: unsupported repair target selector: {selector_key}"
+            )
+    if action.target is None and target_tag is None and target_selector is None:
+        raise PlanValidationError(
+            f"action {index}: repair requires a target type, target tag, or target selector"
+        )
+    if action.target is not None and action.target not in REPAIRABLE_TARGET_KEYS:
         raise PlanValidationError(
             f"action {index}: unsupported repair target: {action.target}"
         )
@@ -715,7 +909,7 @@ def _validate_repair(action: RepairCommand, index: int, state: _PlanState) -> No
         raise PlanValidationError(
             f"action {index}: cannot repair with {action.workers} workers; only {state.workers} exist"
         )
-    if state.known:
+    if state.known and action.target is not None and target_tag is None:
         exists = (
             state.units.get(action.target, 0)
             or state.structures.get(action.target, 0)
@@ -747,14 +941,45 @@ def _validate_rally(
         )
     _validate_selection(action.selection, index)
     _validate_queued(action, index)
-    _validate_location_or_point(
-        action,
-        index,
-        state,
-        "rally",
-        min_coordinate,
-        max_coordinate,
-    )
+    target_unit = getattr(action, "target_unit", None)
+    target_tag = getattr(action, "target_tag", None)
+    has_unit_target = target_unit is not None or target_tag is not None
+    has_point_target = _has_point_target(action)
+    if has_unit_target and has_point_target:
+        raise PlanValidationError(
+            f"action {index}: rally must target a point or a unit, not both"
+        )
+    if not has_unit_target:
+        _validate_location_or_point(
+            action,
+            index,
+            state,
+            "rally",
+            min_coordinate,
+            max_coordinate,
+        )
+    else:
+        if target_tag is not None:
+            _validate_tag(target_tag, index, "rally target")
+        if target_unit is not None:
+            target_key = normalize_name(str(target_unit))
+            if target_key not in {
+                "nearest_mineral",
+                "nearest_friendly",
+                "damaged_friendly",
+                "lowest_health_friendly",
+                "highest_energy_friendly",
+                "any_friendly",
+            }:
+                try:
+                    resolve_alias(
+                        target_key,
+                        categories=("unit", "special_unit", "structure", "morph"),
+                    )
+                except KeyError as exc:
+                    raise PlanValidationError(
+                        f"action {index}: unsupported rally unit target: {target_key}"
+                    ) from exc
     state.require_ready(action.building, index, f"rally {action.building}")
 
 
@@ -891,10 +1116,19 @@ def _action_ability_name(action: object) -> str | None:
         return f"land_{normalize_name(str(actor))}"
     if class_name == "LoadCommand" and actor:
         actor_key = normalize_name(str(actor))
+        has_specific_target = any(
+            getattr(action, field_name, None) is not None
+            for field_name in ("target_unit", "target_tag", "target_selection")
+        )
         return (
-            "load_all_command_center"
+            "load_command_center"
             if actor_key in {"command_center", "orbital_command"}
-            else f"load_{actor_key}"
+            and has_specific_target
+            else (
+                "load_all_command_center"
+                if actor_key in {"command_center", "orbital_command"}
+                else f"load_{actor_key}"
+            )
         )
     if class_name == "UnloadCommand" and actor:
         actor_key = normalize_name(str(actor))
@@ -907,7 +1141,10 @@ def _action_ability_name(action: object) -> str | None:
                 if actor_key == "medivac"
                 else f"unload_all_{ability_actor_key}"
             )
-        if getattr(action, "target_unit", None) is not None:
+        if (
+            getattr(action, "target_unit", None) is not None
+            or getattr(action, "passenger_tag", None) is not None
+        ):
             return f"unload_unit_{ability_actor_key}"
         return f"unload_all_{ability_actor_key}"
     if class_name == "SalvageCommand" and actor:
@@ -988,6 +1225,37 @@ def _validate_selection(selection: object, index: int) -> None:
         "random_seeded",
     }:
         raise PlanValidationError(f"action {index}: unsupported selection mode: {mode}")
+    tags = _selection_value(selection, "tags", ())
+    if tags is None:
+        return
+    if isinstance(tags, (str, int)) or not isinstance(tags, (list, tuple, set)):
+        raise PlanValidationError(
+            f"action {index}: selection tags must be an array of unit tags"
+        )
+    if len(tags) > MAX_TRAIN_OR_SELECTION_COUNT:
+        raise PlanValidationError(
+            f"action {index}: selection has too many tags: {len(tags)} > {MAX_TRAIN_OR_SELECTION_COUNT}"
+        )
+    normalized_tags = [_validate_tag(tag, index, "selection") for tag in tags]
+    if len(set(normalized_tags)) != len(normalized_tags):
+        raise PlanValidationError(
+            f"action {index}: selection tags must not contain duplicates"
+        )
+
+
+def _validate_tag(value: object, index: int, field_name: str) -> str:
+    if isinstance(value, bool):
+        raise PlanValidationError(
+            f"action {index}: {field_name} tag must be a positive integer or digit string"
+        )
+    if isinstance(value, int):
+        if value > 0:
+            return str(value)
+    elif isinstance(value, str) and value.isdigit() and int(value) > 0:
+        return str(int(value))
+    raise PlanValidationError(
+        f"action {index}: {field_name} tag must be a positive integer or digit string"
+    )
 
 
 def _validate_queued(action: object, index: int) -> None:
@@ -1090,6 +1358,7 @@ def _validate_ability_target_filter(
     if target_key in TARGET_SELECTORS:
         exact_target_filters = {
             "supply_depot",
+            "worker",
             "worker_passenger",
             "bunker_loadable",
             "medivac_loadable",
@@ -1108,6 +1377,7 @@ def _validate_ability_target_filter(
         ),
         "mechanical": frozenset(REPAIRABLE_TARGET_KEYS),
         "supply_depot": frozenset({"supply_depot"}),
+        "worker": frozenset({"worker"}),
         "worker_passenger": frozenset({"worker"}),
         "bunker_loadable": frozenset(BUNKER_LOADABLE_UNIT_KEYS),
         "medivac_loadable": frozenset(MEDIVAC_LOADABLE_UNIT_KEYS),
@@ -1116,6 +1386,11 @@ def _validate_ability_target_filter(
         raise PlanValidationError(
             f"action {index}: ability {ability_key} has unsupported target filter {target_filter}"
         )
+    target_alliance = str(_spec_value(spec, "target_alliance", "any"))
+    if target_alliance == "enemy" and target_key not in _KNOWN_ABILITY_TARGET_KEYS:
+        # Cross-race traits are authoritative only in live observations. The
+        # executor still applies the ability filter before issuing the order.
+        return
     if target_key not in allowed_by_filter:
         raise PlanValidationError(
             f"action {index}: ability {ability_key} cannot target {target_key}"
@@ -1124,7 +1399,9 @@ def _validate_ability_target_filter(
 
 def _has_point_target(action: object) -> bool:
     return (
-        getattr(action, "location", None) is not None
+        getattr(action, "target_addon", None) is not None
+        or getattr(action, "target_addon_tag", None) is not None
+        or getattr(action, "location", None) is not None
         or getattr(action, "target_location", None) is not None
         or (
             getattr(action, "x", None) is not None
@@ -1136,7 +1413,13 @@ def _has_point_target(action: object) -> bool:
 def _has_unit_target(action: object) -> bool:
     return any(
         getattr(action, field_name, None) is not None
-        for field_name in ("target_unit", "target_tag", "target_actor", "unit_target")
+        for field_name in (
+            "target_unit",
+            "target_tag",
+            "target_actor",
+            "unit_target",
+            "passenger_tag",
+        )
     )
 
 
@@ -1148,6 +1431,40 @@ def _validate_location_or_point(
     min_coordinate: float,
     max_coordinate: float,
 ) -> None:
+    target_addon = getattr(action, "target_addon", None)
+    target_addon_tag = getattr(action, "target_addon_tag", None)
+    if target_addon is not None or target_addon_tag is not None:
+        if (
+            getattr(action, "location", None) is not None
+            or getattr(action, "target_location", None) is not None
+            or getattr(action, "x", None) is not None
+            or getattr(action, "y", None) is not None
+        ):
+            raise PlanValidationError(
+                f"action {index}: {ability_key} must target an add-on or a point, not both"
+            )
+        if not ability_key.startswith("land_"):
+            raise PlanValidationError(
+                f"action {index}: only land commands may target an add-on"
+            )
+        actor = normalize_name(str(getattr(action, "actor", "")))
+        if actor not in {"barracks", "factory", "starport"}:
+            raise PlanValidationError(
+                f"action {index}: {actor or 'this structure'} cannot land on an add-on"
+            )
+        if target_addon is not None:
+            addon_key = normalize_name(str(target_addon))
+            if addon_key not in ADDON_SPECS:
+                raise PlanValidationError(
+                    f"action {index}: unsupported add-on landing target: {addon_key}"
+                )
+            if state.known and state.structures.get(addon_key, 0) < 1:
+                raise PlanValidationError(
+                    f"action {index}: cannot land on missing add-on {addon_key}"
+                )
+        if target_addon_tag is not None:
+            _validate_tag(target_addon_tag, index, "add-on target")
+        return
     location = getattr(action, "location", None) or getattr(
         action, "target_location", None
     )
@@ -1214,8 +1531,12 @@ def _validate_location_resolvable(
 
 
 def _validate_unit_target(action: object, index: int, ability_key: str) -> None:
+    for field_name in ("target_tag", "passenger_tag"):
+        tag = getattr(action, field_name, None)
+        if tag is not None:
+            _validate_tag(tag, index, field_name.replace("_", " "))
     target = None
-    for field_name in ("target_unit", "target_actor", "unit_target", "target_tag"):
+    for field_name in ("target_unit", "target_actor", "unit_target"):
         value = getattr(action, field_name, None)
         if value is not None:
             target = value
@@ -1235,6 +1556,10 @@ def _validate_unit_target(action: object, index: int, ability_key: str) -> None:
             categories=("unit", "special_unit", "structure", "addon", "morph"),
         )
     except KeyError as exc:
+        spec = _ABILITY_SPECS.get(ability_key)
+        target_alliance = str(_spec_value(spec, "target_alliance", "any"))
+        if target_alliance == "enemy" and re.fullmatch(r"[a-z0-9_]{1,64}", target_key):
+            return
         raise PlanValidationError(
             f"action {index}: unsupported unit target {target_key} for ability {ability_key}"
         ) from exc

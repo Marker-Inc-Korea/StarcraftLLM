@@ -35,6 +35,8 @@ LEGACY_FUNCTIONS = {
 }
 
 NEW_FUNCTIONS = {
+    "move_target",
+    "attack_target",
     "use_ability",
     "scan",
     "call_down_mule",
@@ -42,6 +44,7 @@ NEW_FUNCTIONS = {
     "transform",
     "lift",
     "land",
+    "land_on_addon",
     "load",
     "unload",
     "cancel",
@@ -49,6 +52,7 @@ NEW_FUNCTIONS = {
     "build_nuke",
     "launch_nuke",
     "replan",
+    "return_cargo",
 }
 
 EXPECTED_PUBLIC_FUNCTIONS = LEGACY_FUNCTIONS | NEW_FUNCTIONS
@@ -58,6 +62,11 @@ EXPECTED_LOCATIONS = {
     "own_natural",
     "own_third",
     "own_ramp",
+    "own_ramp_depot_1",
+    "own_ramp_depot_2",
+    "own_ramp_depot_middle",
+    "own_ramp_barracks",
+    "own_ramp_barracks_with_addon",
     "enemy_main",
     "enemy_natural",
     "enemy_third",
@@ -123,6 +132,7 @@ EXPECTED_ABILITIES = {
     "lift_starport": ("LIFT_STARPORT", "none"),
     "land_starport": ("LAND_STARPORT", "point"),
     "load_all_command_center": ("LOADALL_COMMANDCENTER", "none"),
+    "load_command_center": ("COMMANDCENTERTRANSPORT_COMMANDCENTERTRANSPORT", "unit"),
     "unload_all_command_center": ("UNLOADALL_COMMANDCENTER", "none"),
     "unload_unit_command_center": ("UNLOADUNIT_COMMANDCENTER", "unit"),
     "load_bunker": ("LOAD_BUNKER", "unit"),
@@ -215,13 +225,23 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
         )
         self.assertEqual(schemas["build_addon"]["parameters"]["required"], ["addon"])
         self.assertNotIn("producer", schemas["build_addon"]["parameters"]["properties"])
-        self.assertEqual(schemas["repair"]["parameters"]["required"], ["target"])
+        self.assertEqual(schemas["repair"]["parameters"]["required"], [])
+        self.assertEqual(
+            schemas["repair"]["parameters"]["anyOf"],
+            [
+                {"required": ["target"]},
+                {"required": ["target_tag"]},
+                {"required": ["target_selector"]},
+            ],
+        )
         self.assertEqual(
             schemas["repair"]["parameters"]["properties"]["workers"]["maximum"], 100
         )
-        self.assertIn(
-            "nearest_enemy_structure",
-            schemas["use_ability"]["parameters"]["properties"]["target_unit"]["enum"],
+        self.assertEqual(
+            schemas["use_ability"]["parameters"]["properties"]["target_unit"][
+                "pattern"
+            ],
+            "^[a-z0-9_]{1,64}$",
         )
         self.assertIn(
             "mule", schemas["move"]["parameters"]["properties"]["unit"]["enum"]
@@ -274,6 +294,11 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
 
     def test_every_new_llm_command_function_constructs_a_strategy_action(self):
         arguments = {
+            "move_target": {"unit": "medivac", "target_tag": 77},
+            "attack_target": {
+                "unit": "marine",
+                "target_unit": "nearest_enemy",
+            },
             "use_ability": {
                 "ability": "stim_marine",
                 "actor": "marine",
@@ -285,6 +310,10 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
             "transform": {"ability": "siege_mode", "actor": "siege_tank"},
             "lift": {"actor": "barracks"},
             "land": {"actor": "barracks", "location": "proxy"},
+            "land_on_addon": {
+                "actor": "barracks",
+                "target_addon": "factory_tech_lab",
+            },
             "load": {"actor": "medivac", "target_unit": "marine"},
             "unload": {"actor": "medivac", "location": "enemy_main"},
             "cancel": {"target": "build_in_progress"},
@@ -292,6 +321,7 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
             "build_nuke": {},
             "launch_nuke": {"location": "enemy_main"},
             "replan": {"reason": "ability_unavailable"},
+            "return_cargo": {"unit": "worker"},
         }
 
         for name in NEW_FUNCTIONS:
@@ -411,7 +441,15 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
 
         self.assertEqual(set(location_specs), EXPECTED_LOCATIONS)
         self.assertEqual(
-            set(selection_modes), {"all", "ready", "idle", "closest", "lowest_health"}
+            set(selection_modes),
+            {
+                "all",
+                "ready",
+                "idle",
+                "closest",
+                "lowest_health",
+                "highest_energy",
+            },
         )
 
 

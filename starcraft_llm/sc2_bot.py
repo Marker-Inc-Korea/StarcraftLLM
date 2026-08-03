@@ -25,6 +25,7 @@ from starcraft_llm.command_catalog import (
     MEDIVAC_LOADABLE_UNIT_KEYS,
     MORPH_SPECS,
     PSIONIC_UNIT_KEYS,
+    REPAIRABLE_TARGET_KEYS,
     RUNTIME_ACTOR_UNIT_TYPES,
     STRUCTURE_SPECS,
     TARGET_SELECTORS,
@@ -65,6 +66,7 @@ from starcraft_llm.strategy import (
     RallyCommand,
     RepairCommand,
     ResearchUpgradeCommand,
+    ReturnCargoCommand,
     StopCommand,
     StrategyPlan,
     TrainUnitCommand,
@@ -176,7 +178,11 @@ def summarize_bot_state(bot) -> GameStateSummary:
         _unit_observation(unit, "self") for unit in _iter_observable_units(bot)
     )
     enemy_observations = tuple(
-        _unit_observation(unit, "enemy") for unit in getattr(bot, "enemy_units", ())
+        _unit_observation(unit, "enemy") for unit in _iter_observable_enemy_units(bot)
+    )
+    resource_observations = tuple(
+        _unit_observation(unit, "neutral")
+        for unit in _iter_observable_resource_units(bot)
     )
     semantic_locations = _semantic_location_snapshots(bot)
 
@@ -206,7 +212,9 @@ def summarize_bot_state(bot) -> GameStateSummary:
         structures_ready=structures_ready,
         structures_pending=structures_pending,
         upgrades=tuple(sorted(set(upgrades))),
-        unit_observations=unit_observations + enemy_observations,
+        unit_observations=(
+            unit_observations + enemy_observations + resource_observations
+        ),
         semantic_locations=semantic_locations,
     )
 
@@ -226,9 +234,43 @@ def _iter_observable_units(bot):
             yield unit
 
 
+def _iter_observable_enemy_units(bot):
+    seen_tags = set()
+    for collection in (
+        getattr(bot, "enemy_units", ()),
+        getattr(bot, "enemy_structures", ()),
+    ):
+        for unit in collection:
+            tag = getattr(unit, "tag", id(unit))
+            if tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            yield unit
+
+
+def _iter_observable_resource_units(bot):
+    seen_tags = set()
+    for collection in (
+        getattr(bot, "mineral_field", ()),
+        getattr(bot, "vespene_geyser", ()),
+    ):
+        for unit in collection:
+            tag = getattr(unit, "tag", id(unit))
+            if tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            yield unit
+
+
 def _unit_observation(unit, alliance: str) -> UnitObservationSnapshot:
     position = getattr(unit, "position", None)
     orders = tuple(_order_name(order) for order in getattr(unit, "orders", ()) or ())
+    passengers = tuple(
+        sorted(
+            getattr(unit, "passengers", None) or getattr(unit, "cargo", None) or (),
+            key=lambda passenger: str(getattr(passenger, "tag", "")),
+        )
+    )
     return UnitObservationSnapshot(
         unit=_unit_type_name(unit),
         alliance=alliance,
@@ -245,6 +287,19 @@ def _unit_observation(unit, alliance: str) -> UnitObservationSnapshot:
         is_idle=getattr(unit, "is_idle", None),
         cargo_used=_optional_int(getattr(unit, "cargo_used", None)),
         cargo_max=_optional_int(getattr(unit, "cargo_max", None)),
+        add_on_tag=getattr(unit, "add_on_tag", None),
+        passenger_tags=tuple(
+            tag
+            for passenger in passengers
+            if (tag := getattr(passenger, "tag", None)) is not None
+        ),
+        passenger_units=tuple(_unit_type_name(passenger) for passenger in passengers),
+        is_biological=getattr(unit, "is_biological", None),
+        is_mechanical=getattr(unit, "is_mechanical", None),
+        is_psionic=getattr(unit, "is_psionic", None),
+        is_massive=getattr(unit, "is_massive", None),
+        is_detector=getattr(unit, "is_detector", None),
+        weapon_cooldown=_optional_float(getattr(unit, "weapon_cooldown", None)),
         orders=orders,
     )
 
@@ -259,7 +314,11 @@ def _semantic_location_points(bot) -> dict[str, Any | None]:
     enemy_main = (getattr(bot, "enemy_start_locations", None) or [None])[0]
     map_center = getattr(getattr(bot, "game_info", None), "map_center", None)
     ramp = getattr(bot, "main_base_ramp", None)
-    own_ramp = getattr(ramp, "top_center", None) or getattr(ramp, "bottom_center", None)
+    own_ramp = _ramp_point(ramp, "top_center") or _ramp_point(ramp, "bottom_center")
+    corner_depots = sorted(
+        _ramp_points(ramp, "corner_depots"),
+        key=lambda point: _point_coordinates(point) or (0.0, 0.0),
+    )
 
     expansions = list(getattr(bot, "expansion_locations_list", ()) or ())
     own_expansions = _expansions_away_from(expansions, own_main)
@@ -292,6 +351,11 @@ def _semantic_location_points(bot) -> dict[str, Any | None]:
         "own_natural": own_natural,
         "own_third": own_third,
         "own_ramp": own_ramp,
+        "own_ramp_depot_1": corner_depots[0] if corner_depots else None,
+        "own_ramp_depot_2": corner_depots[1] if len(corner_depots) > 1 else None,
+        "own_ramp_depot_middle": _ramp_point(ramp, "depot_in_middle"),
+        "own_ramp_barracks": _ramp_point(ramp, "barracks_in_middle"),
+        "own_ramp_barracks_with_addon": _ramp_point(ramp, "barracks_correct_placement"),
         "enemy_main": enemy_main,
         "enemy_natural": enemy_natural,
         "enemy_third": enemy_third,
@@ -308,6 +372,25 @@ def _semantic_location_points(bot) -> dict[str, Any | None]:
             getattr(bot, "mineral_field", ()), townhall
         ),
     }
+
+
+def _ramp_point(ramp, attribute: str):
+    if ramp is None:
+        return None
+    try:
+        return getattr(ramp, attribute, None)
+    except (AssertionError, AttributeError, IndexError, KeyError, ValueError):
+        return None
+
+
+def _ramp_points(ramp, attribute: str) -> list[Any]:
+    value = _ramp_point(ramp, attribute)
+    if value is None:
+        return []
+    try:
+        return list(value)
+    except TypeError:
+        return []
 
 
 def _expansions_away_from(points: list[Any], origin: Any | None) -> list[Any]:
@@ -570,10 +653,13 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._execute_wait_until(action, iteration)
                 return
             if isinstance(action, GatherMineralsCommand):
-                self._execute_gather_minerals(action, iteration)
+                await self._execute_gather_minerals(action, iteration)
                 return
             if isinstance(action, GatherGasCommand):
-                self._execute_gather_gas(action, iteration)
+                await self._execute_gather_gas(action, iteration)
+                return
+            if isinstance(action, ReturnCargoCommand):
+                self._execute_unit_order(action, iteration, "return_resource")
                 return
             if isinstance(action, DistributeWorkersCommand):
                 await self._execute_distribute_workers(action)
@@ -609,7 +695,14 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             raise TypeError(f"unsupported strategy action: {action!r}")
 
         async def _execute_move(self, command: MoveCommand, iteration: int) -> None:
-            target = await self._resolve_location(command)
+            initial_units = self._select_units(command.unit, command)
+            if (
+                getattr(command, "target_unit", None) is not None
+                or getattr(command, "target_tag", None) is not None
+            ):
+                target = self._resolve_friendly_move_target(command, initial_units)
+            else:
+                target = await self._resolve_location(command)
             units = self._select_units(command.unit, command, target)
             if target is None:
                 await self._retry_or_replan(
@@ -626,6 +719,57 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._advance_action()
             elif iteration % 22 == 0:
                 print(f"Waiting for controllable {command.unit} units...")
+
+        def _resolve_friendly_move_target(self, command: MoveCommand, sources):
+            source_tags = {str(getattr(source, "tag", "")) for source in list(sources)}
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                candidates = (
+                    list(getattr(self, "units", []))
+                    + list(getattr(self, "workers", []))
+                    + list(getattr(self, "structures", []))
+                )
+                candidate = next(
+                    (
+                        item
+                        for item in candidates
+                        if str(getattr(item, "tag", "")) == expected
+                        and expected not in source_tags
+                    ),
+                    None,
+                )
+                return (
+                    candidate
+                    if candidate is not None
+                    and self._matches_named_target(candidate, command, "friendly")
+                    else None
+                )
+
+            target_name = normalize_name(str(getattr(command, "target_unit", "")))
+            if target_name in {
+                "nearest_friendly",
+                "damaged_friendly",
+                "lowest_health_friendly",
+                "highest_energy_friendly",
+                "any_friendly",
+            }:
+                candidates = self._friendly_target_candidates(target_name)
+            else:
+                candidates = list(self._select_exact_units(target_name))
+            candidates = [
+                candidate
+                for candidate in candidates
+                if str(getattr(candidate, "tag", "")) not in source_tags
+            ]
+            if not candidates:
+                return None
+            if target_name in {"nearest_friendly", "any_friendly"} and sources:
+                reference = self._first_unit(sources)
+                candidates.sort(
+                    key=lambda unit: self._distance_squared(unit, reference)
+                )
+            return candidates[0]
 
         async def _execute_attack(
             self, command: AttackMoveCommand, iteration: int
@@ -654,26 +798,57 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             self, command: AttackEnemyCommand, iteration: int
         ) -> None:
             units = self._select_units(command.unit, command)
-            enemies = list(getattr(self, "enemy_units", [])) + list(
-                getattr(self, "enemy_structures", [])
-            )
-            if units and enemies:
-                reference = self._first_unit(units)
-                target = min(
-                    enemies,
-                    key=lambda enemy: self._distance_squared(enemy, reference),
-                )
+            target = self._resolve_attack_target(command, units)
+            if units and target is not None:
                 for unit in units:
                     self._issue_order(unit, "attack", target, command.queued)
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
-                    f"issued attack command to {len(units)} {command.unit} unit(s) against visible enemy"
+                    f"issued attack command to {len(units)} {command.unit} unit(s) "
+                    f"against visible target {getattr(command, 'target_unit', None) or getattr(command, 'target_tag', None) or 'nearest_enemy'}"
                 )
                 self._advance_action()
             elif iteration % 22 == 0:
                 print(
-                    f"Waiting for controllable {command.unit} units and visible enemies before attacking..."
+                    f"Waiting for controllable {command.unit} units and the requested visible enemy before attacking..."
                 )
+
+        def _resolve_attack_target(self, command: AttackEnemyCommand, units):
+            enemies = list(getattr(self, "enemy_units", [])) + list(
+                getattr(self, "enemy_structures", [])
+            )
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                candidate = next(
+                    (
+                        enemy
+                        for enemy in enemies
+                        if str(getattr(enemy, "tag", "")) == expected
+                    ),
+                    None,
+                )
+                return (
+                    candidate
+                    if candidate is not None
+                    and self._matches_named_target(candidate, command, "enemy")
+                    else None
+                )
+            selector = normalize_name(
+                str(getattr(command, "target_unit", None) or "nearest_enemy")
+            )
+            candidates = self._enemy_target_candidates(selector, "")
+            if not candidates:
+                return None
+            if units and selector not in {
+                "lowest_health_enemy",
+                "highest_energy_enemy",
+            }:
+                reference = self._first_unit(units)
+                candidates.sort(
+                    key=lambda enemy: self._distance_squared(enemy, reference)
+                )
+            return candidates[0]
 
         async def _execute_patrol(self, command: PatrolCommand, iteration: int) -> None:
             target = await self._resolve_location(command)
@@ -716,9 +891,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
 
         async def _execute_rally(self, command: RallyCommand, iteration: int) -> None:
-            target = await self._resolve_location(command)
+            target = await self._resolve_rally_target(command)
             structures = self._apply_selection_spec(
-                self._ready_idle_structures(command.building), command, target
+                self._ready_structures(command.building), command, target
             )
             if target is None:
                 await self._retry_or_replan(
@@ -738,6 +913,64 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 print(
                     f"Waiting for a ready {command.building} before setting rally point..."
                 )
+
+        async def _resolve_rally_target(self, command: RallyCommand):
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                candidates = (
+                    list(getattr(self, "units", []))
+                    + list(getattr(self, "workers", []))
+                    + list(getattr(self, "structures", []))
+                    + list(getattr(self, "mineral_field", []))
+                )
+                candidate = next(
+                    (
+                        item
+                        for item in candidates
+                        if str(getattr(item, "tag", "")) == expected
+                    ),
+                    None,
+                )
+                target_unit = getattr(command, "target_unit", None)
+                if candidate is None or target_unit is None:
+                    return candidate
+                if normalize_name(str(target_unit)) == "nearest_mineral":
+                    return (
+                        candidate
+                        if any(
+                            str(getattr(mineral, "tag", "")) == expected
+                            for mineral in getattr(self, "mineral_field", [])
+                        )
+                        else None
+                    )
+                return (
+                    candidate
+                    if self._matches_named_target(candidate, command, "friendly")
+                    else None
+                )
+            target_unit = getattr(command, "target_unit", None)
+            if target_unit is None:
+                return await self._resolve_location(command)
+            target_name = normalize_name(str(target_unit))
+            if target_name == "nearest_mineral":
+                minerals = getattr(self, "mineral_field", [])
+                if not minerals:
+                    return None
+                reference = (
+                    self._first_unit(self.townhalls)
+                    if getattr(self, "townhalls", None)
+                    else self._build_near_point()
+                )
+                return (
+                    minerals.closest_to(reference)
+                    if hasattr(minerals, "closest_to")
+                    else min(
+                        minerals,
+                        key=lambda mineral: self._distance_squared(mineral, reference),
+                    )
+                )
+            return self._resolve_unit_target(command, "friendly")
 
         def _execute_wait(self, command: WaitCommand) -> None:
             game_time = getattr(self, "time", None)
@@ -780,11 +1013,32 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     f"Still waiting for {self._describe_action(command)} (current={current:g})"
                 )
 
-        def _execute_gather_minerals(
+        async def _execute_gather_minerals(
             self, command: GatherMineralsCommand, iteration: int
         ) -> None:
             workers = self._select_units(command.unit, command)
-            mineral_fields = self.mineral_field
+            mineral_fields = list(self.mineral_field)
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                mineral_fields = [
+                    mineral
+                    for mineral in mineral_fields
+                    if str(getattr(mineral, "tag", "")) == expected
+                ]
+            anchor = (
+                await self._resolve_location(command)
+                if getattr(command, "location", None) is not None
+                else None
+            )
+            anchored_mineral = (
+                min(
+                    mineral_fields,
+                    key=lambda mineral: self._distance_squared(mineral, anchor),
+                )
+                if anchor is not None and mineral_fields
+                else None
+            )
             if workers and mineral_fields:
                 issued = 0
                 selected_workers = (
@@ -793,8 +1047,15 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     else workers
                 )
                 for worker in selected_workers:
-                    mineral_field = self._closest_mineral_field(mineral_fields, worker)
-                    worker.gather(mineral_field)
+                    mineral_field = anchored_mineral or self._closest_mineral_field(
+                        mineral_fields, worker
+                    )
+                    self._issue_order(
+                        worker,
+                        "gather",
+                        mineral_field,
+                        bool(getattr(command, "queued", False)),
+                    )
                     issued += 1
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
@@ -804,11 +1065,28 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             elif iteration % 22 == 0:
                 print("Waiting for workers and mineral fields before gathering...")
 
-        def _execute_gather_gas(
+        async def _execute_gather_gas(
             self, command: GatherGasCommand, iteration: int
         ) -> None:
             workers = self._select_units(command.unit, command)
-            refineries = self._ready_refineries()
+            refineries = list(self._ready_refineries())
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                refineries = [
+                    refinery
+                    for refinery in refineries
+                    if str(getattr(refinery, "tag", "")) == expected
+                ]
+            anchor = (
+                await self._resolve_location(command)
+                if getattr(command, "location", None) is not None
+                else None
+            )
+            if anchor is not None:
+                refineries.sort(
+                    key=lambda refinery: self._distance_squared(refinery, anchor)
+                )
             if workers and refineries:
                 issued = 0
                 requested_workers = (
@@ -819,7 +1097,12 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 max_workers = min(len(workers), len(refineries) * 3, requested_workers)
                 for index, worker in enumerate(workers[:max_workers]):
                     refinery = refineries[index % len(refineries)]
-                    worker.gather(refinery)
+                    self._issue_order(
+                        worker,
+                        "gather",
+                        refinery,
+                        bool(getattr(command, "queued", False)),
+                    )
                     issued += 1
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
@@ -854,7 +1137,11 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
 
             unit_type = self._train_unit_type(command.unit)
-            producers = self._available_producers(command.unit)
+            producers = self._apply_selection_spec(
+                self._available_producers(command.unit),
+                command,
+                selection_override=getattr(command, "producer_selection", None),
+            )
             if not producers:
                 if iteration % 22 == 0:
                     print(
@@ -929,7 +1216,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     if command.location is not None
                     else None
                 )
-                issued = self._execute_refinery_build(unit_type, near=near)
+                issued = self._execute_refinery_build(
+                    unit_type, near=near, command=command
+                )
             else:
                 near = (
                     await self._resolve_location(command)
@@ -1027,7 +1316,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
 
             spec = ADDON_SPECS[command.addon]
-            producers = self._free_addon_producers(spec.producer or "")
+            producers = self._apply_selection_spec(
+                self._free_addon_producers(spec.producer or ""), command
+            )
             used_tags = self._action_context.get("producer_tags", set())
             producer = next(
                 (
@@ -1066,7 +1357,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         ) -> None:
             if command.building not in MORPH_SPECS:
                 raise TypeError(f"unsupported structure morph: {command.building}")
-            sources = self._available_command_centers()
+            sources = self._apply_selection_spec(
+                self._available_command_centers(), command
+            )
             if not sources:
                 if iteration % 22 == 0:
                     print(
@@ -1107,7 +1400,18 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                         f"Waiting for enough resources to research {command.upgrade}..."
                     )
                 return
-            if hasattr(self, "research"):
+            researcher_selection = getattr(command, "researcher_selection", None)
+            if researcher_selection is not None:
+                researchers = self._apply_selection_spec(
+                    self._ready_idle_structures(
+                        UPGRADE_SPECS[command.upgrade].researcher or ""
+                    ),
+                    command,
+                    selection_override=researcher_selection,
+                )
+                researcher = self._first_unit(researchers) if researchers else None
+                issued = researcher.research(upgrade_type) if researcher else False
+            elif hasattr(self, "research"):
                 issued = self.research(upgrade_type)
             else:
                 researcher = self._first_unit(
@@ -1126,7 +1430,26 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 print(f"Waiting for an available researcher for {command.upgrade}...")
 
         def _execute_repair(self, command: RepairCommand, iteration: int) -> None:
-            targets = self._repair_targets(command.target)
+            if command.target is not None:
+                targets = list(self._repair_targets(command.target))
+            else:
+                combined_targets = []
+                for target_name in REPAIRABLE_TARGET_KEYS:
+                    combined_targets.extend(self._repair_targets(target_name))
+                targets = list(
+                    {
+                        str(getattr(target, "tag", id(target))): target
+                        for target in combined_targets
+                    }.values()
+                )
+            target_tag = getattr(command, "target_tag", None)
+            if target_tag is not None:
+                expected = str(target_tag)
+                targets = [
+                    target
+                    for target in targets
+                    if str(getattr(target, "tag", "")) == expected
+                ]
             if not targets:
                 if iteration % 22 == 0:
                     print(f"Waiting for repair target {command.target}...")
@@ -1139,10 +1462,36 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
                 self._advance_action()
                 return
-            workers = self.workers[: command.workers]
+            target_selection = getattr(command, "target_selection", None)
+            target_selector = normalize_name(
+                str(getattr(command, "target_selector", ""))
+            )
+            if target_selection is None and target_selector:
+                target_selection = {
+                    "mode": (
+                        "lowest_health"
+                        if target_selector
+                        in {"damaged_friendly", "lowest_health_friendly"}
+                        else "closest"
+                    ),
+                    "count": 1,
+                }
+            damaged = self._apply_selection_spec(
+                damaged,
+                command,
+                self._build_near_point(),
+                selection_override=target_selection,
+            )
+            workers = self._apply_selection_spec(self.workers, command)[
+                : command.workers
+            ]
             if not workers:
                 if iteration % 22 == 0:
                     print("Waiting for workers before repairing...")
+                return
+            if not damaged:
+                if iteration % 22 == 0:
+                    print(f"Waiting for selected repair target {command.target}...")
                 return
             target = damaged[0]
             for worker in workers:
@@ -1181,26 +1530,59 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         async def _issue_structure_build(
             self, command: BuildStructureCommand, unit_type, near
         ) -> bool:
-            if command.selection is not None and hasattr(self, "find_placement"):
-                placement = self.find_placement(
-                    unit_type,
-                    near=near,
-                    max_distance=20,
-                    random_alternative=False,
-                    placement_step=1,
-                )
+            placement_mode = normalize_name(
+                str(getattr(command, "placement_mode", "near"))
+            )
+            configured_distance = int(getattr(command, "max_distance", 20))
+            max_distance = 0 if placement_mode == "exact" else configured_distance
+            reserve_addon_space = bool(getattr(command, "reserve_addon_space", False))
+            if (
+                command.selection is not None
+                or placement_mode == "exact"
+                or reserve_addon_space
+            ) and hasattr(self, "find_placement"):
+                try:
+                    placement = self.find_placement(
+                        unit_type,
+                        near=near,
+                        max_distance=max_distance,
+                        random_alternative=False,
+                        placement_step=1,
+                        addon_place=reserve_addon_space,
+                    )
+                except TypeError:
+                    placement = self.find_placement(
+                        unit_type,
+                        near=near,
+                        max_distance=max_distance,
+                        random_alternative=False,
+                        placement_step=1,
+                    )
                 if hasattr(placement, "__await__"):
                     placement = await placement
                 if placement is None:
                     return False
-                workers = self._apply_selection_spec(
-                    getattr(self, "workers", []), command, placement
-                )
-                if not workers:
+                if command.selection is not None:
+                    workers = self._apply_selection_spec(
+                        getattr(self, "workers", []), command, placement
+                    )
+                    worker = self._first_unit(workers) if workers else None
+                elif hasattr(self, "select_build_worker"):
+                    worker = self.select_build_worker(placement)
+                else:
+                    workers = list(getattr(self, "workers", []))
+                    worker = self._first_unit(workers) if workers else None
+                if worker is None:
                     return False
-                issued = self._first_unit(workers).build(unit_type, placement)
+                issued = worker.build(unit_type, placement)
                 return issued is not False
-            return bool(await self.build(unit_type, near=near, max_distance=20))
+            return bool(
+                await self.build(
+                    unit_type,
+                    near=near,
+                    max_distance=max_distance,
+                )
+            )
 
         @staticmethod
         def _closest_mineral_field(mineral_fields, worker):
@@ -1230,11 +1612,15 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             return producers
 
         def _ready_idle_structures(self, building: str):
+            structures = self._ready_structures(building)
+            if hasattr(structures, "idle"):
+                structures = structures.idle
+            return structures
+
+        def _ready_structures(self, building: str):
             structures = self._structures_of_type(self._structure_unit_type(building))
             if hasattr(structures, "ready"):
                 structures = structures.ready
-            if hasattr(structures, "idle"):
-                structures = structures.idle
             return structures
 
         def _free_addon_producers(self, producer: str):
@@ -1339,7 +1725,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
             raise TypeError(f"unsupported wait-until condition: {command.condition}")
 
-        def _execute_refinery_build(self, unit_type, near=None) -> bool:
+        def _execute_refinery_build(
+            self, unit_type, near=None, command: BuildStructureCommand | None = None
+        ) -> bool:
             geysers = getattr(self, "vespene_geyser", [])
             if not geysers:
                 return False
@@ -1352,11 +1740,17 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 if reference is not None and hasattr(geysers, "closest_to")
                 else geysers[0]
             )
-            worker = (
-                self.select_build_worker(geyser)
-                if hasattr(self, "select_build_worker")
-                else self._first_unit(self.workers)
-            )
+            if command is not None and command.selection is not None:
+                workers = self._apply_selection_spec(
+                    getattr(self, "workers", []), command, geyser
+                )
+                worker = self._first_unit(workers) if workers else None
+            else:
+                if hasattr(self, "select_build_worker"):
+                    worker = self.select_build_worker(geyser)
+                else:
+                    workers = list(getattr(self, "workers", []))
+                    worker = self._first_unit(workers) if workers else None
             if not worker:
                 return False
             worker.build(unit_type, geyser)
@@ -1459,14 +1853,29 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             return []
 
         def _apply_selection_spec(
-            self, units, command: Any | None = None, target: Any | None = None
+            self,
+            units,
+            command: Any | None = None,
+            target: Any | None = None,
+            selection_override: Any | None = None,
         ):
             selection = (
-                getattr(command, "selection", None) if command is not None else None
+                selection_override
+                if selection_override is not None
+                else (
+                    getattr(command, "selection", None) if command is not None else None
+                )
             )
             count = self._selection_count(selection, command)
             mode = self._selection_mode(selection, command)
             result = list(units)
+            selected_tags = self._selection_tags(selection)
+            if selected_tags:
+                result = [
+                    unit
+                    for unit in result
+                    if str(getattr(unit, "tag", "")) in selected_tags
+                ]
             if mode == "ready":
                 result = [unit for unit in result if getattr(unit, "is_ready", True)]
             elif mode == "idle":
@@ -1495,6 +1904,21 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             else:
                 result.sort(key=lambda unit: getattr(unit, "tag", id(unit)))
             return result[:count]
+
+        @staticmethod
+        def _selection_tags(selection: Any | None) -> set[str]:
+            if selection is None:
+                return set()
+            raw_tags = (
+                selection.get("tags", ())
+                if isinstance(selection, dict)
+                else getattr(selection, "tags", ())
+            )
+            if raw_tags is None:
+                return set()
+            if isinstance(raw_tags, (str, int)):
+                raw_tags = (raw_tags,)
+            return {str(tag) for tag in raw_tags}
 
         @staticmethod
         def _selection_count(selection: Any | None, command: Any | None) -> int:
@@ -1716,13 +2140,41 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
 
             target_name = normalize_name(str(getattr(command, "target_unit", "")))
-            targets = list(self._select_exact_units(target_name))
+            target_tag = getattr(command, "target_tag", None)
+            if target_name in TARGET_SELECTORS:
+                targets = self._friendly_target_candidates(target_name)
+            elif target_name:
+                targets = list(self._select_exact_units(target_name))
+            else:
+                targets = list(getattr(self, "units", [])) + list(
+                    getattr(self, "workers", [])
+                )
+            if target_tag is not None:
+                expected = str(target_tag)
+                targets = [
+                    target
+                    for target in targets
+                    if str(getattr(target, "tag", "")) == expected
+                ]
             targets = [
                 target
                 for target in targets
                 if self._matches_ability_target(target, spec.target_filter)
             ]
-            requested = getattr(command, "count", None) or 1
+            reference = getattr(available_sources[0], "position", available_sources[0])
+            target_selection = getattr(command, "target_selection", None)
+            targets = self._apply_selection_spec(
+                targets,
+                command,
+                reference,
+                selection_override=target_selection,
+            )
+            target_selection_count = (
+                target_selection.get("count")
+                if isinstance(target_selection, dict)
+                else getattr(target_selection, "count", None)
+            )
+            requested = getattr(command, "count", None) or target_selection_count or 1
             if not targets:
                 await self._retry_or_replan(
                     command,
@@ -1730,12 +2182,17 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     f"load targets {target_name} are unavailable",
                 )
                 return
-            reference = getattr(available_sources[0], "position", available_sources[0])
-            targets.sort(
-                key=lambda unit: self._distance_squared(
-                    getattr(unit, "position", unit), reference
+            target_mode = self._selection_mode(target_selection, None)
+            if target_mode not in {
+                "damaged",
+                "lowest_health",
+                "highest_energy",
+            }:
+                targets.sort(
+                    key=lambda unit: self._distance_squared(
+                        getattr(unit, "position", unit), reference
+                    )
                 )
-            )
             if len(targets) < requested:
                 await self._retry_or_replan(
                     command,
@@ -1861,7 +2318,19 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"{kind}_{subject}"
             if kind == "load":
                 if subject in {"command_center", "orbital_command"}:
-                    return "load_all_command_center"
+                    has_specific_target = any(
+                        getattr(action, field_name, None) is not None
+                        for field_name in (
+                            "target_unit",
+                            "target_tag",
+                            "target_selection",
+                        )
+                    )
+                    return (
+                        "load_command_center"
+                        if has_specific_target
+                        else "load_all_command_center"
+                    )
                 if getattr(action, "all", False) or getattr(action, "load_all", False):
                     return f"load_all_{subject}"
                 return f"load_{subject}"
@@ -1929,6 +2398,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             )
 
         async def _resolve_location(self, action: Any):
+            target_addon = getattr(action, "target_addon", None)
+            target_addon_tag = getattr(action, "target_addon_tag", None)
+            if target_addon is not None or target_addon_tag is not None:
+                return self._resolve_addon_land_position(target_addon, target_addon_tag)
             x = getattr(action, "x", None)
             y = getattr(action, "y", None)
             if x is not None and y is not None:
@@ -1969,6 +2442,41 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             coordinates = _point_coordinates(resolved)
             return point2_class(coordinates) if coordinates is not None else None
 
+        def _resolve_addon_land_position(
+            self, target_addon: Any | None, target_addon_tag: Any | None
+        ):
+            attached_tags = {
+                str(tag)
+                for structure in list(getattr(self, "structures", []))
+                if (tag := getattr(structure, "add_on_tag", 0))
+            }
+            if target_addon is not None:
+                candidates = list(
+                    self._select_exact_units(normalize_name(str(target_addon)))
+                )
+            else:
+                candidates = list(getattr(self, "structures", []))
+            if target_addon_tag is not None:
+                expected = str(target_addon_tag)
+                candidates = [
+                    addon
+                    for addon in candidates
+                    if str(getattr(addon, "tag", "")) == expected
+                ]
+            candidates = [
+                addon
+                for addon in candidates
+                if _unit_type_name(addon) in ADDON_SPECS
+                and str(getattr(addon, "tag", "")) not in attached_tags
+                and getattr(addon, "add_on_land_position", None) is not None
+            ]
+            candidates.sort(key=lambda addon: str(getattr(addon, "tag", "")))
+            if not candidates:
+                return None
+            position = getattr(candidates[0], "add_on_land_position")
+            coordinates = _point_coordinates(position)
+            return point2_class(coordinates) if coordinates is not None else position
+
         def _closest_unit_position(self, units):
             if not units:
                 return None
@@ -1987,13 +2495,52 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _resolve_unit_target(
             self, action: Any, alliance: str, ability_key: str = ""
         ):
+            spec = _RUNTIME_ABILITY_SPECS.get(ability_key)
+            target_filter = spec.target_filter if spec is not None else "any"
+            target_tag = getattr(action, "target_tag", None)
+            if target_tag is not None:
+                if alliance == "passenger":
+                    candidate = self._resolve_passenger_target(action)
+                else:
+                    expected = str(target_tag)
+                    if alliance == "enemy":
+                        tagged_candidates = list(
+                            getattr(self, "enemy_units", [])
+                        ) + list(getattr(self, "enemy_structures", []))
+                    else:
+                        tagged_candidates = (
+                            list(getattr(self, "units", []))
+                            + list(getattr(self, "workers", []))
+                            + list(getattr(self, "structures", []))
+                        )
+                    candidate = next(
+                        (
+                            item
+                            for item in tagged_candidates
+                            if str(getattr(item, "tag", "")) == expected
+                        ),
+                        None,
+                    )
+                if candidate is None or not self._matches_ability_target(
+                    candidate, target_filter
+                ):
+                    return None
+                return (
+                    candidate
+                    if self._matches_named_target(candidate, action, alliance)
+                    else None
+                )
             explicit = (
                 getattr(action, "target_unit", None)
                 or getattr(action, "target", None)
                 or getattr(action, "passenger", None)
             )
             if explicit is not None and not isinstance(explicit, str):
-                return explicit
+                return (
+                    explicit
+                    if self._matches_ability_target(explicit, target_filter)
+                    else None
+                )
             target_name = normalize_name(str(explicit)) if explicit else ""
             if (
                 alliance == "enemy"
@@ -2003,24 +2550,39 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 candidates = self._enemy_target_candidates(target_name, ability_key)
                 return candidates[0] if candidates else None
             if alliance == "passenger":
-                return self._resolve_passenger_target(action)
+                candidate = self._resolve_passenger_target(action)
+                if candidate is None or not self._matches_ability_target(
+                    candidate, target_filter
+                ):
+                    return None
+                return (
+                    candidate
+                    if self._matches_named_target(candidate, action, alliance)
+                    else None
+                )
             friendly = (
                 list(getattr(self, "units", []))
                 + list(getattr(self, "workers", []))
                 + list(getattr(self, "structures", []))
             )
-            spec = _RUNTIME_ABILITY_SPECS.get(ability_key)
-            target_filter = spec.target_filter if spec is not None else "any"
             friendly = [
                 unit
                 for unit in friendly
                 if self._matches_ability_target(unit, target_filter)
             ]
-            if target_name in {"nearest_friendly", "any_friendly"}:
-                return friendly[0] if friendly else None
-            if target_name == "damaged_friendly":
-                damaged = [unit for unit in friendly if self._is_damaged(unit)]
-                return min(damaged, key=self._health_ratio) if damaged else None
+            if target_name in {
+                "nearest_friendly",
+                "any_friendly",
+                "damaged_friendly",
+                "lowest_health_friendly",
+                "highest_energy_friendly",
+            }:
+                candidates = [
+                    unit
+                    for unit in self._friendly_target_candidates(target_name)
+                    if self._matches_ability_target(unit, target_filter)
+                ]
+                return candidates[0] if candidates else None
             if target_name:
                 units = self._select_exact_units(target_name)
                 compatible = [
@@ -2037,15 +2599,77 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return self._first_unit(units) if units else None
             return friendly[0] if friendly else None
 
+        def _matches_named_target(
+            self, candidate: Any, action: Any, alliance: str
+        ) -> bool:
+            explicit = (
+                getattr(action, "target_unit", None)
+                or getattr(action, "target", None)
+                or getattr(action, "passenger", None)
+            )
+            if explicit is None or not isinstance(explicit, str):
+                return True
+            target_name = normalize_name(explicit)
+            if not target_name:
+                return True
+
+            if target_name in {
+                "nearest_enemy",
+                "lowest_health_enemy",
+                "highest_energy_enemy",
+            }:
+                return alliance == "enemy"
+            if target_name == "nearest_enemy_structure":
+                return alliance == "enemy" and bool(
+                    getattr(candidate, "is_structure", False)
+                )
+            enemy_predicates = {
+                "nearest_enemy_ground": lambda unit: not bool(
+                    getattr(unit, "is_flying", False)
+                ),
+                "nearest_enemy_air": lambda unit: bool(
+                    getattr(unit, "is_flying", False)
+                ),
+                "nearest_enemy_biological": lambda unit: bool(
+                    getattr(unit, "is_biological", False)
+                ),
+                "nearest_enemy_mechanical": lambda unit: bool(
+                    getattr(unit, "is_mechanical", False)
+                ),
+                "nearest_enemy_massive": lambda unit: bool(
+                    getattr(unit, "is_massive", False)
+                ),
+                "nearest_enemy_detector": lambda unit: bool(
+                    getattr(unit, "is_detector", False)
+                ),
+            }
+            enemy_predicate = enemy_predicates.get(target_name)
+            if enemy_predicate is not None:
+                return alliance == "enemy" and enemy_predicate(candidate)
+
+            if target_name in {
+                "nearest_friendly",
+                "any_friendly",
+                "highest_energy_friendly",
+            }:
+                return alliance in {"friendly", "any", "passenger"}
+            if target_name in {"damaged_friendly", "lowest_health_friendly"}:
+                return alliance in {
+                    "friendly",
+                    "any",
+                    "passenger",
+                } and self._is_damaged(candidate)
+            return _unit_type_name(candidate) == target_name
+
         def _enemy_target_candidates(
             self, selector: str, ability_key: str
         ) -> list[Any]:
             if selector == "nearest_enemy_structure":
                 candidates = list(getattr(self, "enemy_structures", []))
             else:
-                candidates = list(getattr(self, "enemy_units", []))
-                if not candidates and selector in {"", "nearest_enemy"}:
-                    candidates = list(getattr(self, "enemy_structures", []))
+                candidates = list(getattr(self, "enemy_units", [])) + list(
+                    getattr(self, "enemy_structures", [])
+                )
 
             predicates = {
                 "nearest_enemy_ground": lambda unit: not bool(
@@ -2094,6 +2718,29 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
             return candidates
 
+        def _friendly_target_candidates(self, selector: str) -> list[Any]:
+            combined = (
+                list(getattr(self, "units", []))
+                + list(getattr(self, "workers", []))
+                + list(getattr(self, "structures", []))
+            )
+            candidates = list(
+                {
+                    str(getattr(unit, "tag", id(unit))): unit for unit in combined
+                }.values()
+            )
+            if selector in {"damaged_friendly", "lowest_health_friendly"}:
+                candidates = [unit for unit in candidates if self._is_damaged(unit)]
+                candidates.sort(key=self._health_ratio)
+            elif selector == "highest_energy_friendly":
+                candidates.sort(key=lambda unit: -float(getattr(unit, "energy", 0.0)))
+            else:
+                reference = self._build_near_point()
+                candidates.sort(
+                    key=lambda unit: self._distance_squared(unit, reference)
+                )
+            return candidates
+
         def _resolve_passenger_target(self, action: Any):
             passenger_tag = getattr(action, "passenger_tag", None) or getattr(
                 action, "target_tag", None
@@ -2111,10 +2758,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     or []
                 )
                 for passenger in cargo:
-                    if (
-                        passenger_tag is not None
-                        and getattr(passenger, "tag", None) != passenger_tag
-                    ):
+                    if passenger_tag is not None and str(
+                        getattr(passenger, "tag", "")
+                    ) != str(passenger_tag):
                         continue
                     if target_name and _unit_type_name(passenger) != target_name:
                         continue
@@ -2141,9 +2787,44 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 and isinstance(available[0], (list, tuple, set))
             ):
                 available = list(available[0])
-            return ability_id in available or getattr(
-                ability_id, "name", ability_id
-            ) in {getattr(item, "name", item) for item in available}
+            (
+                requested_name,
+                requested_generic,
+                requested_is_generic,
+            ) = self._ability_identity(ability_id)
+            for item in available:
+                (
+                    available_name,
+                    available_generic,
+                    available_is_generic,
+                ) = self._ability_identity(item)
+                if available_name == requested_name:
+                    return True
+                if available_is_generic and available_name == requested_generic:
+                    return True
+                if requested_is_generic and requested_name == available_generic:
+                    return True
+            return False
+
+        @staticmethod
+        def _ability_identity(ability_id: Any) -> tuple[str, str, bool]:
+            name = str(getattr(ability_id, "name", ability_id))
+            try:
+                from sc2.dicts.generic_redirect_abilities import (
+                    GENERIC_REDIRECT_ABILITIES,
+                )
+                from sc2.ids.ability_id import AbilityId
+
+                exact_id = getattr(AbilityId, name, ability_id)
+                generic_id = GENERIC_REDIRECT_ABILITIES.get(exact_id, exact_id)
+                generic_name = str(getattr(generic_id, "name", generic_id))
+                return name, generic_name, name == generic_name
+            except (ImportError, TypeError):
+                return name, name, True
+
+        @classmethod
+        def _generic_ability_name(cls, ability_id: Any) -> str:
+            return cls._ability_identity(ability_id)[1]
 
         @staticmethod
         def _issue_order(unit, method_name: str, target, queued: bool) -> None:
@@ -2326,6 +3007,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return is_mechanical
             if target_filter == "supply_depot":
                 return key == "supply_depot"
+            if target_filter == "worker":
+                return key == "worker"
             if target_filter == "worker_passenger":
                 return key == "worker"
             if target_filter == "bunker_loadable":
@@ -2421,6 +3104,11 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         @staticmethod
         def _describe_action(action) -> str:
             if isinstance(action, MoveCommand):
+                if action.target_unit is not None or action.target_tag is not None:
+                    return (
+                        f"move {action.unit} toward friendly target "
+                        f"{action.target_unit or action.target_tag}"
+                    )
                 return (
                     f"move {action.unit} to {_MoveUnitBot._describe_location(action)}"
                 )

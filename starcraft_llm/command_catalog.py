@@ -115,6 +115,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         example='{"type":"move","unit":"worker","x":35,"y":42}',
     ),
     CommandVerbSpec(
+        key="move_target",
+        description="Move or follow a specific visible friendly unit selected by type, selector, or runtime tag.",
+        target_registry="TARGET_SELECTORS",
+        target_field="target_unit",
+        example='{"type":"move_target","unit":"medivac","target_unit":"nearest_friendly"}',
+    ),
+    CommandVerbSpec(
         key="attack_move",
         description="Attack-move a bounded Terran unit group toward coordinates or a semantic location.",
         target_registry="UNIT_SPECS",
@@ -127,6 +134,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="UNIT_SPECS",
         target_field="unit",
         example='{"type":"attack_enemy","unit":"marine"}',
+    ),
+    CommandVerbSpec(
+        key="attack_target",
+        description="Attack a specific visible enemy selected by selector/type or runtime unit tag.",
+        target_registry="TARGET_SELECTORS",
+        target_field="target_unit",
+        example='{"type":"attack_target","unit":"marine","target_unit":"nearest_enemy_structure"}',
     ),
     CommandVerbSpec(
         key="patrol",
@@ -172,10 +186,17 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
     ),
     CommandVerbSpec(
         key="gather",
-        description="Assign workers to minerals or ready refineries.",
+        description="Assign selected workers to minerals, ready refineries, semantic resource anchors, or resource tags.",
         target_registry="resource",
         target_field="resource",
         example='{"type":"gather","resource":"minerals","workers":8}',
+    ),
+    CommandVerbSpec(
+        key="return_cargo",
+        description="Return carried resources from selected workers or MULEs.",
+        target_registry="UNIT_SPECS",
+        target_field="unit",
+        example='{"type":"return_cargo","unit":"worker","selection":{"tags":[123]}}',
     ),
     CommandVerbSpec(
         key="distribute_workers",
@@ -281,6 +302,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="LOCATION_SPECS",
         target_field="location",
         example='{"type":"land","actor":"barracks","location":"proxy"}',
+    ),
+    CommandVerbSpec(
+        key="land_on_addon",
+        description="Land a supported flying production structure on a specific add-on by type or runtime tag.",
+        target_registry="ADDON_SPECS",
+        target_field="target_addon",
+        example='{"type":"land_on_addon","actor":"barracks","target_addon":"barracks_tech_lab"}',
     ),
     CommandVerbSpec(
         key="load",
@@ -1424,6 +1452,14 @@ ABILITY_SPECS: Mapping[str, AbilitySpec] = _ability_registry(
         _ability("lift_starport", "LIFT_STARPORT", "none", ("starport",)),
         _ability("land_starport", "LAND_STARPORT", "point", ("starport",)),
         _ability(
+            "load_command_center",
+            "COMMANDCENTERTRANSPORT_COMMANDCENTERTRANSPORT",
+            "unit",
+            ("command_center", "orbital_command"),
+            target_alliance="friendly",
+            target_filter="worker",
+        ),
+        _ability(
             "load_all_command_center",
             "LOADALL_COMMANDCENTER",
             "none",
@@ -1593,6 +1629,31 @@ LOCATION_SPECS: Mapping[str, LocationSpec] = MappingProxyType(
             LocationSpec("own_third", "Own third expansion.", ("third",)),
             LocationSpec("own_ramp", "Ramp between own main and natural.", ("ramp",)),
             LocationSpec(
+                "own_ramp_depot_1",
+                "First wall-off supply depot placement near own ramp.",
+                ("ramp depot 1", "wall depot 1"),
+            ),
+            LocationSpec(
+                "own_ramp_depot_2",
+                "Second wall-off supply depot placement near own ramp.",
+                ("ramp depot 2", "wall depot 2"),
+            ),
+            LocationSpec(
+                "own_ramp_depot_middle",
+                "Middle/tight wall-off supply depot placement near own ramp.",
+                ("ramp middle depot", "wall middle depot"),
+            ),
+            LocationSpec(
+                "own_ramp_barracks",
+                "Wall-off barracks placement near own ramp.",
+                ("ramp barracks", "wall barracks"),
+            ),
+            LocationSpec(
+                "own_ramp_barracks_with_addon",
+                "Wall-off barracks placement that reserves add-on room near own ramp.",
+                ("ramp barracks addon", "wall barracks addon"),
+            ),
+            LocationSpec(
                 "enemy_main", "Enemy starting main base.", ("enemy", "enemy main")
             ),
             LocationSpec(
@@ -1648,6 +1709,7 @@ SELECTION_SPECS: Mapping[str, SelectionSpec] = MappingProxyType(
                 "closest", "Closest matching actors to the target location/unit."
             ),
             SelectionSpec("lowest_health", "Lowest-health matching actors first."),
+            SelectionSpec("highest_energy", "Highest-energy matching actors first."),
         )
     }
 )
@@ -1665,6 +1727,8 @@ TARGET_SELECTORS: NameTuple = (
     "lowest_health_enemy",
     "highest_energy_enemy",
     "nearest_friendly",
+    "lowest_health_friendly",
+    "highest_energy_friendly",
     "damaged_friendly",
     "any_friendly",
 )

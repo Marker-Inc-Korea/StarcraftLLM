@@ -96,15 +96,20 @@ class PlannerInterfaceTest(unittest.TestCase):
             action_types,
             {
                 "move",
+                "move_target",
                 "attack",
+                "attack_move",
                 "attack_enemy",
+                "attack_target",
                 "patrol",
                 "hold",
+                "hold_position",
                 "stop",
                 "rally",
                 "wait",
                 "wait_until",
                 "gather",
+                "return_cargo",
                 "distribute_workers",
                 "train",
                 "build",
@@ -120,6 +125,7 @@ class PlannerInterfaceTest(unittest.TestCase):
                 "transform",
                 "lift",
                 "land",
+                "land_on_addon",
                 "load",
                 "unload",
                 "cancel",
@@ -129,6 +135,25 @@ class PlannerInterfaceTest(unittest.TestCase):
                 "replan",
             },
         )
+
+    def test_gemini_schema_exposes_precise_selection_for_all_selection_roles(self):
+        properties = strategy_plan_json_schema()["properties"]["actions"]["items"][
+            "properties"
+        ]
+
+        for field in (
+            "selection",
+            "target_selection",
+            "producer_selection",
+            "researcher_selection",
+        ):
+            with self.subTest(field=field):
+                selection = properties[field]
+                self.assertIn("highest_energy", selection["properties"]["mode"]["enum"])
+                self.assertEqual(
+                    selection["properties"]["tags"]["items"],
+                    {"type": "integer", "minimum": 1},
+                )
 
     def test_gemini_planner_accepts_plan_alias_from_model_output(self):
         def fake_post(url, headers, payload, timeout):
