@@ -79,6 +79,9 @@ class PlannerInterfaceTest(unittest.TestCase):
         self.assertIn("wait_until", captured["payload"]["input"])
         self.assertIn("structures_ready", captured["payload"]["input"])
         self.assertIn("attack_enemy", captured["payload"]["input"])
+        self.assertIn("move_and_wait", captured["payload"]["input"])
+        self.assertIn("focus_fire", captured["payload"]["input"])
+        self.assertIn("maintain_production", captured["payload"]["input"])
         self.assertIn("gather gas", captured["payload"]["input"])
         self.assertIn("count?:integer", captured["payload"]["input"])
         self.assertIn("factory_tech_lab", captured["payload"]["input"])
@@ -97,10 +100,13 @@ class PlannerInterfaceTest(unittest.TestCase):
             {
                 "move",
                 "move_target",
+                "move_and_wait",
                 "attack",
                 "attack_move",
                 "attack_enemy",
                 "attack_target",
+                "focus_fire",
+                "kite",
                 "patrol",
                 "hold",
                 "hold_position",
@@ -112,6 +118,8 @@ class PlannerInterfaceTest(unittest.TestCase):
                 "return_cargo",
                 "distribute_workers",
                 "train",
+                "produce_until",
+                "maintain_production",
                 "build",
                 "expand",
                 "build_addon",

@@ -17,6 +17,7 @@ MAX_REPLAN_CYCLES = 2
 MAX_SELECTION_COUNT = 200
 MAX_WORKER_ASSIGNMENT_COUNT = 100
 MAX_STRUCTURE_ACTION_COUNT = 20
+MAX_POLICY_SECONDS = 1200
 
 
 @dataclass(frozen=True)
@@ -122,6 +123,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         example='{"type":"move_target","unit":"medivac","target_unit":"nearest_friendly"}',
     ),
     CommandVerbSpec(
+        key="move_and_wait",
+        description="Move a bounded Terran unit group to a point or visible friendly target, keep following a moving target, and wait until the selected actors arrive or the bounded timeout expires.",
+        target_registry="LOCATION_SPECS",
+        target_field="location",
+        example='{"type":"move_and_wait","unit":"worker","location":"enemy_natural","arrival_tolerance":2.5}',
+    ),
+    CommandVerbSpec(
         key="attack_move",
         description="Attack-move a bounded Terran unit group toward coordinates or a semantic location.",
         target_registry="UNIT_SPECS",
@@ -141,6 +149,20 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="TARGET_SELECTORS",
         target_field="target_unit",
         example='{"type":"attack_target","unit":"marine","target_unit":"nearest_enemy_structure"}',
+    ),
+    CommandVerbSpec(
+        key="focus_fire",
+        description="Keep a bounded attack-capable actor group focused on one visible target until it dies or a timeout expires.",
+        target_registry="TARGET_SELECTORS",
+        target_field="target_unit",
+        example='{"type":"focus_fire","unit":"marine","target_unit":"lowest_health_enemy"}',
+    ),
+    CommandVerbSpec(
+        key="kite",
+        description="Run bounded cooldown-aware stutter-step micro against one visible enemy target.",
+        target_registry="TARGET_SELECTORS",
+        target_field="target_unit",
+        example='{"type":"kite","unit":"marine","target_unit":"nearest_enemy","duration_seconds":8}',
     ),
     CommandVerbSpec(
         key="patrol",
@@ -211,6 +233,20 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="UNIT_SPECS",
         target_field="unit",
         example='{"type":"train","unit":"marine","count":1}',
+    ),
+    CommandVerbSpec(
+        key="produce_until",
+        description="Continuously train a Terran unit until an absolute owned-unit target is reached or a bounded timeout expires.",
+        target_registry="UNIT_SPECS",
+        target_field="unit",
+        example='{"type":"produce_until","unit":"scv","target_count":22}',
+    ),
+    CommandVerbSpec(
+        key="maintain_production",
+        description="Register bounded background unit production while later plan actions continue, then keep the plan alive until the target is reached.",
+        target_registry="UNIT_SPECS",
+        target_field="unit",
+        example='{"type":"maintain_production","unit":"marine","target_count":16,"reserve_minerals":150}',
     ),
     CommandVerbSpec(
         key="build",
@@ -611,6 +647,14 @@ SPECIAL_UNIT_SPECS: Registry = _registry(
             0,
             aliases=("mules", "지게로봇", "지게 로봇"),
         ),
+        _spec(
+            "auto_turret",
+            "AUTOTURRET",
+            0,
+            0,
+            0,
+            aliases=("autoturret", "auto turret", "자동포탑", "자동 포탑"),
+        ),
     )
 )
 
@@ -619,10 +663,10 @@ CONTROLLABLE_UNIT_SPECS: Registry = MappingProxyType(
     {**UNIT_SPECS, **SPECIAL_UNIT_SPECS}
 )
 
-# Canonical units that expose an actual basic attack order in standard melee.
-# Medivacs and Ravens are support casters, while Widow Mines attack
-# autonomously only after burrowing, so none of those should be advertised to
-# an LLM as valid basic attack-move actors.
+# Canonical actors that expose a player-issued basic attack order in standard
+# melee. Planetary Fortresses, Missile Turrets, and summoned Auto Turrets are
+# intentionally included for explicit target fire, but the command schema keeps
+# them out of attack-move and kite surfaces because they are immobile.
 ATTACK_CAPABLE_UNIT_KEYS: NameTuple = (
     "scv",
     "marine",
@@ -638,7 +682,17 @@ ATTACK_CAPABLE_UNIT_KEYS: NameTuple = (
     "liberator",
     "banshee",
     "battlecruiser",
+    "planetary_fortress",
+    "missile_turret",
+    "auto_turret",
 )
+
+MOBILE_ATTACK_CAPABLE_UNIT_KEYS: NameTuple = tuple(
+    key
+    for key in ATTACK_CAPABLE_UNIT_KEYS
+    if key not in {"planetary_fortress", "missile_turret", "auto_turret"}
+)
+MOVABLE_SPECIAL_UNIT_KEYS: NameTuple = ("mule",)
 
 # These canonical structures expose basic movement orders only while their
 # live UnitTypeId is the corresponding flying form. Runtime form filtering
@@ -684,6 +738,12 @@ STRUCTURE_SPECS: Registry = _registry(
             0,
             producer="scv",
             aliases=("gas", "vespene", "정제소"),
+            runtime_state_keys=(
+                "refinery",
+                "refineryrich",
+                "refinery_rich",
+                "rich_refinery",
+            ),
         ),
         _spec(
             "barracks",
@@ -1294,6 +1354,14 @@ ABILITY_SPECS: Mapping[str, AbilitySpec] = _ability_registry(
         ),
         _ability("widow_mine_burrow_up", "BURROWUP_WIDOWMINE", "none", ("widow_mine",)),
         _ability(
+            "widow_mine_attack",
+            "WIDOWMINEATTACK_WIDOWMINEATTACK",
+            "unit",
+            ("widow_mine",),
+            target_alliance="enemy",
+            aliases=("widow_mine_target_fire", "mine_attack"),
+        ),
+        _ability(
             "cyclone_lock_on",
             "LOCKON_LOCKON",
             "unit",
@@ -1766,6 +1834,7 @@ def _runtime_actor_unit_types() -> Mapping[str, NameTuple]:
             "barracks": ("BARRACKS", "BARRACKSFLYING"),
             "factory": ("FACTORY", "FACTORYFLYING"),
             "starport": ("STARPORT", "STARPORTFLYING"),
+            "refinery": ("REFINERY", "REFINERYRICH"),
         }
     )
     return MappingProxyType(actor_types)
@@ -2048,13 +2117,16 @@ __all__ = (
     "LIFTABLE_STRUCTURE_KEYS",
     "LocationSpec",
     "MAX_PLAN_ACTIONS",
+    "MAX_POLICY_SECONDS",
     "MAX_REPLAN_CYCLES",
     "MAX_SELECTION_COUNT",
     "MAX_STRUCTURE_ACTION_COUNT",
     "MAX_WORKER_ASSIGNMENT_COUNT",
     "MECHANICAL_UNIT_KEYS",
     "MEDIVAC_LOADABLE_UNIT_KEYS",
+    "MOBILE_ATTACK_CAPABLE_UNIT_KEYS",
     "MORPH_SPECS",
+    "MOVABLE_SPECIAL_UNIT_KEYS",
     "PSIONIC_UNIT_KEYS",
     "REPAIRABLE_TARGET_KEYS",
     "REPAIRABLE_UNIT_KEYS",

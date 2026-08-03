@@ -19,14 +19,16 @@ from starcraft_llm.command_catalog import (
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
     LIFTABLE_STRUCTURE_KEYS,
+    MAX_POLICY_SECONDS,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
     MEDIVAC_LOADABLE_UNIT_KEYS,
+    MOBILE_ATTACK_CAPABLE_UNIT_KEYS,
     MORPH_SPECS,
+    MOVABLE_SPECIAL_UNIT_KEYS,
     REPAIRABLE_TARGET_KEYS,
     SALVAGEABLE_STRUCTURE_KEYS,
-    SPECIAL_UNIT_SPECS,
     STRUCTURE_SPECS,
     TRANSFORM_ABILITY_KEYS,
     TRANSPORT_ACTOR_KEYS,
@@ -85,6 +87,33 @@ def move_target(
     )
 
 
+def move_and_wait(
+    unit: str,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    location: Optional[str] = None,
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+    arrival_tolerance: float = 2.5,
+    timeout_seconds: float = 90,
+) -> StrategyAction:
+    return _command(
+        "move_and_wait",
+        unit=unit,
+        x=x,
+        y=y,
+        location=location,
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+        arrival_tolerance=arrival_tolerance,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def attack_move(
     unit: str,
     x: Optional[float] = None,
@@ -135,6 +164,44 @@ def attack_target(
         target_tag=target_tag,
         selection=selection,
         queued=queued,
+    )
+
+
+def focus_fire(
+    unit: str = "marine",
+    target_unit: Optional[str] = None,
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    queued: bool = False,
+    timeout_seconds: float = 60,
+) -> StrategyAction:
+    return _command(
+        "focus_fire",
+        unit=unit,
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        queued=queued,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def kite(
+    unit: str,
+    target_unit: str = "nearest_enemy",
+    target_tag: Optional[int | str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    duration_seconds: float = 8,
+    retreat_distance: float = 2,
+) -> StrategyAction:
+    return _command(
+        "kite",
+        unit=unit,
+        target_unit=target_unit,
+        target_tag=target_tag,
+        selection=selection,
+        duration_seconds=duration_seconds,
+        retreat_distance=retreat_distance,
     )
 
 
@@ -201,9 +268,30 @@ def wait(seconds: float) -> StrategyAction:
 
 
 def wait_until(
-    condition: str, at_least: float = 1, target: Optional[str] = None
+    condition: str,
+    at_least: float = 1,
+    target: Optional[str] = None,
+    location: Optional[str] = None,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    radius: float = 12,
+    selection: Optional[Mapping[str, Any]] = None,
+    timeout_seconds: float = 120,
+    on_timeout: str = "replan",
 ) -> StrategyAction:
-    return _command("wait_until", condition=condition, at_least=at_least, target=target)
+    return _command(
+        "wait_until",
+        condition=condition,
+        at_least=at_least,
+        target=target,
+        location=location,
+        x=x,
+        y=y,
+        radius=radius,
+        selection=selection,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
+    )
 
 
 def gather(
@@ -249,6 +337,48 @@ def train(
 ) -> StrategyAction:
     return _command(
         "train", unit=unit, count=count, producer_selection=producer_selection
+    )
+
+
+def produce_until(
+    unit: str,
+    target_count: int,
+    producer_selection: Optional[Mapping[str, Any]] = None,
+    reserve_minerals: int = 0,
+    reserve_vespene: int = 0,
+    reserve_supply: int = 0,
+    max_seconds: float = 300,
+) -> StrategyAction:
+    return _command(
+        "produce_until",
+        unit=unit,
+        target_count=target_count,
+        producer_selection=producer_selection,
+        reserve_minerals=reserve_minerals,
+        reserve_vespene=reserve_vespene,
+        reserve_supply=reserve_supply,
+        max_seconds=max_seconds,
+    )
+
+
+def maintain_production(
+    unit: str,
+    target_count: int,
+    producer_selection: Optional[Mapping[str, Any]] = None,
+    reserve_minerals: int = 0,
+    reserve_vespene: int = 0,
+    reserve_supply: int = 0,
+    max_seconds: float = 300,
+) -> StrategyAction:
+    return _command(
+        "maintain_production",
+        unit=unit,
+        target_count=target_count,
+        producer_selection=producer_selection,
+        reserve_minerals=reserve_minerals,
+        reserve_vespene=reserve_vespene,
+        reserve_supply=reserve_supply,
+        max_seconds=max_seconds,
     )
 
 
@@ -595,9 +725,12 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
     {
         "move": move,
         "move_target": move_target,
+        "move_and_wait": move_and_wait,
         "attack_move": attack_move,
         "attack_enemy": attack_enemy,
         "attack_target": attack_target,
+        "focus_fire": focus_fire,
+        "kite": kite,
         "patrol": patrol,
         "hold_position": hold_position,
         "stop": stop,
@@ -608,6 +741,8 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
         "return_cargo": return_cargo,
         "distribute_workers": distribute_workers,
         "train": train,
+        "produce_until": produce_until,
+        "maintain_production": maintain_production,
         "build": build,
         "expand": expand,
         "build_addon": build_addon,
@@ -700,12 +835,15 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
     """Return provider-neutral JSON function declarations for every safe command."""
 
     standard_unit_enum = ["worker", *[key for key in UNIT_SPECS if key != "scv"]]
-    attack_unit_enum = [
+    attack_actor_enum = [
         "worker" if key == "scv" else key for key in ATTACK_CAPABLE_UNIT_KEYS
+    ]
+    mobile_attack_unit_enum = [
+        "worker" if key == "scv" else key for key in MOBILE_ATTACK_CAPABLE_UNIT_KEYS
     ]
     movable_unit_enum = [
         *standard_unit_enum,
-        *SPECIAL_UNIT_SPECS,
+        *MOVABLE_SPECIAL_UNIT_KEYS,
         *FLYING_STRUCTURE_ACTOR_KEYS,
     ]
     structure_enum = list(STRUCTURE_SPECS)
@@ -737,7 +875,11 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
     location: dict[str, Any] = {"type": "string", "enum": list(LOCATION_SPECS)}
     attack_unit: dict[str, Any] = {
         "type": "string",
-        "enum": attack_unit_enum,
+        "enum": mobile_attack_unit_enum,
+    }
+    attack_actor: dict[str, Any] = {
+        "type": "string",
+        "enum": attack_actor_enum,
     }
     movable_unit: dict[str, Any] = {
         "type": "string",
@@ -873,6 +1015,11 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         "maximum": 20,
     }
     queued: dict[str, Any] = {"type": "boolean"}
+    bounded_policy_seconds: dict[str, Any] = {
+        "type": "number",
+        "minimum": 1,
+        "maximum": MAX_POLICY_SECONDS,
+    }
     point_order: dict[str, dict[str, Any]] = {
         "location": location,
         **point,
@@ -902,6 +1049,26 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             ),
         ),
         _function(
+            "move_and_wait",
+            "Move a bounded Terran unit group to a point or visible friendly and wait for arrival with a bounded timeout.",
+            _target_choice_schema(
+                {
+                    "unit": movable_unit,
+                    **point_order,
+                    "target_unit": friendly_move_target,
+                    "target_tag": tag,
+                    "arrival_tolerance": {
+                        "type": "number",
+                        "minimum": 0.25,
+                        "maximum": 20,
+                    },
+                    "timeout_seconds": bounded_policy_seconds,
+                },
+                (("location",), ("x", "y"), ("target_unit",), ("target_tag",)),
+                ("unit",),
+            ),
+        ),
+        _function(
             "attack_move",
             "Attack-move a bounded Terran unit group to coordinates or a semantic location.",
             _point_target_schema({"unit": attack_unit, **point_order}, ("unit",)),
@@ -911,7 +1078,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "Attack the nearest visible enemy, or a specific enemy when target_unit/target_tag is provided.",
             _object_schema(
                 {
-                    "unit": attack_unit,
+                    "unit": attack_actor,
                     "target_unit": enemy_target,
                     "target_tag": tag,
                     "selection": selection,
@@ -925,13 +1092,52 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "Attack a specific visible enemy by selector/type or runtime unit tag.",
             _one_target_schema(
                 {
-                    "unit": attack_unit,
+                    "unit": attack_actor,
                     "target_unit": enemy_target,
                     "target_tag": tag,
                     "selection": selection,
                     "queued": queued,
                 },
                 ("target_unit", "target_tag"),
+                ("unit",),
+            ),
+        ),
+        _function(
+            "focus_fire",
+            "Keep selected attack-capable actors focused on one visible enemy until it dies or timeout.",
+            _one_target_schema(
+                {
+                    "unit": attack_actor,
+                    "target_unit": enemy_target,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "queued": queued,
+                    "timeout_seconds": bounded_policy_seconds,
+                },
+                ("target_unit", "target_tag"),
+                ("unit",),
+            ),
+        ),
+        _function(
+            "kite",
+            "Run bounded weapon-cooldown-aware stutter-step micro against one visible enemy.",
+            _object_schema(
+                {
+                    "unit": attack_unit,
+                    "target_unit": enemy_target,
+                    "target_tag": tag,
+                    "selection": selection,
+                    "duration_seconds": {
+                        "type": "number",
+                        "minimum": 0.25,
+                        "maximum": 30,
+                    },
+                    "retreat_distance": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 10,
+                    },
+                },
                 ("unit",),
             ),
         ),
@@ -952,7 +1158,16 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
             "stop",
             "Stop a bounded Terran unit group's current order.",
             _object_schema(
-                {"unit": movable_unit, "selection": selection, "queued": queued},
+                {
+                    "unit": {
+                        "type": "string",
+                        "enum": list(
+                            dict.fromkeys((*movable_unit_enum, *attack_actor_enum))
+                        ),
+                    },
+                    "selection": selection,
+                    "queued": queued,
+                },
                 ("unit",),
             ),
         ),
@@ -970,6 +1185,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                             "barracks",
                             "factory",
                             "starport",
+                            "bunker",
                         ],
                     },
                     **point_order,
@@ -990,7 +1206,7 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "wait_until",
-            "Wait for a resource, supply, unit, structure, base, upgrade, or game-time condition.",
+            "Wait for a bounded observed resource, unit, enemy, proximity, cargo, production, tech, or time condition.",
             _object_schema(
                 {
                     "condition": {
@@ -1008,10 +1224,25 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                             "townhall_count",
                             "upgrade_complete",
                             "game_time",
+                            "army_supply",
+                            "enemy_unit_count",
+                            "enemy_structure_count",
+                            "idle_structure_count",
+                            "producer_available",
+                            "cargo_used",
+                            "unit_near_location",
+                            "enemy_near_location",
+                            "under_attack",
                         ],
                     },
                     "target": {"type": "string"},
                     "at_least": {"type": "number", "minimum": 0, "maximum": 10000},
+                    "location": location,
+                    **point,
+                    "radius": {"type": "number", "minimum": 0.5, "maximum": 64},
+                    "selection": selection,
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
                 },
                 ("condition", "at_least"),
             ),
@@ -1066,6 +1297,54 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                     "producer_selection": selection,
                 },
                 ("unit",),
+            ),
+        ),
+        _function(
+            "produce_until",
+            "Continuously train a Terran unit until an absolute owned-unit count is reached.",
+            _object_schema(
+                {
+                    "unit": {"type": "string", "enum": list(UNIT_SPECS)},
+                    "target_count": selection_count,
+                    "producer_selection": selection,
+                    "reserve_minerals": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                    },
+                    "reserve_vespene": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                    },
+                    "reserve_supply": {"type": "integer", "minimum": 0, "maximum": 200},
+                    "max_seconds": bounded_policy_seconds,
+                },
+                ("unit", "target_count"),
+            ),
+        ),
+        _function(
+            "maintain_production",
+            "Register bounded background production while later plan actions continue.",
+            _object_schema(
+                {
+                    "unit": {"type": "string", "enum": list(UNIT_SPECS)},
+                    "target_count": selection_count,
+                    "producer_selection": selection,
+                    "reserve_minerals": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                    },
+                    "reserve_vespene": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 10000,
+                    },
+                    "reserve_supply": {"type": "integer", "minimum": 0, "maximum": 200},
+                    "max_seconds": bounded_policy_seconds,
+                },
+                ("unit", "target_count"),
             ),
         ),
         _function(
@@ -1336,6 +1615,7 @@ __all__ = (
     "attack_enemy",
     "attack_move",
     "attack_target",
+    "focus_fire",
     "build",
     "build_addon",
     "create_plan",
@@ -1343,15 +1623,18 @@ __all__ = (
     "expand",
     "gather",
     "hold_position",
+    "kite",
     "llm_command_function_schemas",
     "morph",
     "move",
+    "move_and_wait",
     "move_target",
     "patrol",
     "rally",
     "repair",
     "research",
     "return_cargo",
+    "maintain_production",
     "build_nuke",
     "call_down_mule",
     "cancel",
@@ -1370,6 +1653,7 @@ __all__ = (
     "stop",
     "strategy_plan_from_function_calls",
     "train",
+    "produce_until",
     "wait",
     "wait_until",
 )

@@ -8,12 +8,16 @@ from typing import Any, Union
 from starcraft_llm.command_catalog import (
     ABILITY_SPECS,
     ADDON_SPECS,
+    ATTACK_CAPABLE_UNIT_KEYS,
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
+    MAX_POLICY_SECONDS,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
     MORPH_SPECS,
+    MOBILE_ATTACK_CAPABLE_UNIT_KEYS,
+    MOVABLE_SPECIAL_UNIT_KEYS,
     REPAIRABLE_TARGET_KEYS,
     STRUCTURE_SPECS,
     TARGET_SELECTORS,
@@ -58,6 +62,9 @@ class MoveCommand:
     queued: bool = False
     target_unit: str | None = None
     target_tag: int | None = None
+    wait_for_arrival: bool = False
+    arrival_tolerance: float = 2.5
+    timeout_seconds: float = 90.0
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,20 @@ class AttackEnemyCommand:
     queued: bool = False
     target_unit: str | None = None
     target_tag: int | None = None
+    wait_for_target_death: bool = False
+    timeout_seconds: float = 60.0
+
+
+@dataclass(frozen=True)
+class KiteCommand:
+    """Bounded cooldown-aware stutter-step micro against one visible target."""
+
+    unit: str
+    target_unit: str = "nearest_enemy"
+    target_tag: int | None = None
+    selection: SelectionSpec | None = None
+    duration_seconds: float = 8.0
+    retreat_distance: float = 2.0
 
 
 @dataclass(frozen=True)
@@ -97,6 +118,11 @@ class WaitUntilCommand:
     condition: str
     at_least: float
     target: str | None = None
+    location: LocationRef | None = None
+    radius: float = 12.0
+    selection: SelectionSpec | None = None
+    timeout_seconds: float = 120.0
+    on_timeout: str = "replan"
 
 
 @dataclass(frozen=True)
@@ -139,6 +165,20 @@ class TrainUnitCommand:
     unit: str
     count: int = 1
     producer_selection: SelectionSpec | None = None
+
+
+@dataclass(frozen=True)
+class ProductionPolicyCommand:
+    """Bounded foreground/background production toward an absolute unit count."""
+
+    unit: str
+    target_count: int
+    background: bool = False
+    producer_selection: SelectionSpec | None = None
+    reserve_minerals: int = 0
+    reserve_vespene: int = 0
+    reserve_supply: int = 0
+    max_seconds: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -368,6 +408,7 @@ StrategyAction = Union[
     MoveCommand,
     AttackMoveCommand,
     AttackEnemyCommand,
+    KiteCommand,
     PatrolCommand,
     HoldPositionCommand,
     StopCommand,
@@ -379,6 +420,7 @@ StrategyAction = Union[
     ReturnCargoCommand,
     DistributeWorkersCommand,
     TrainUnitCommand,
+    ProductionPolicyCommand,
     BuildStructureCommand,
     ExpandCommand,
     BuildAddonCommand,
@@ -531,10 +573,34 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         return LaunchNukeCommand(location=_parse_location_words(parts[2:]))
     if verb == "move":
         return _parse_move(parts, default_unit=default_unit)
+    if verb in {"move_and_wait", "move-and-wait"}:
+        command = _parse_move(["move", *parts[1:]], default_unit=default_unit)
+        return MoveCommand(
+            unit=command.unit,
+            x=command.x,
+            y=command.y,
+            location=command.location,
+            wait_for_arrival=True,
+        )
     if verb in {"follow", "move_target", "move-target"}:
         return _parse_follow(parts)
     if verb in {"attack", "attack_move", "attack-move"}:
         return _parse_attack(parts, default_unit=default_unit)
+    if verb in {"focus_fire", "focus-fire"}:
+        if len(parts) < 3:
+            raise StrategyParseError("use: focus_fire marine nearest_enemy")
+        return AttackEnemyCommand(
+            unit=normalize_attack_actor(parts[1]),
+            target_unit=normalize_enemy_target(" ".join(parts[2:])),
+            wait_for_target_death=True,
+        )
+    if verb == "kite":
+        if len(parts) < 3:
+            raise StrategyParseError("use: kite marine nearest_enemy")
+        return KiteCommand(
+            unit=normalize_mobile_attack_unit(parts[1]),
+            target_unit=normalize_enemy_target(" ".join(parts[2:])),
+        )
     if verb == "patrol":
         return _parse_patrol(parts, default_unit=default_unit)
     if verb in {"hold", "hold_position", "hold-position"}:
@@ -553,6 +619,23 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         return _parse_distribute_workers(parts)
     if verb == "train":
         return _parse_train(parts)
+    if verb in {
+        "produce_until",
+        "produce-until",
+        "maintain_production",
+        "maintain-production",
+    }:
+        if len(parts) < 3:
+            raise StrategyParseError(
+                "use: produce_until marine 16 or maintain_production scv 22"
+            )
+        return ProductionPolicyCommand(
+            unit=normalize_train_unit(" ".join(parts[1:-1])),
+            target_count=_parse_positive_int(
+                parts[-1], "production target", MAX_SELECTION_COUNT
+            ),
+            background=verb in {"maintain_production", "maintain-production"},
+        )
     if verb == "build":
         return _parse_build(parts)
     if verb == "expand":
@@ -602,8 +685,8 @@ def parse_strategy_action(text: str, default_unit: str = "worker") -> StrategyAc
         return ReplanCommand(reason=" ".join(parts[1:]) or "requested")
 
     raise StrategyParseError(
-        "unsupported strategy command; use move, follow, attack, patrol, hold, stop, rally, wait, "
-        "gather, return_cargo, distribute, train, build, expand, addon, morph, research, repair, use_ability, "
+        "unsupported strategy command; use move, move_and_wait, follow, attack, focus_fire, kite, patrol, hold, stop, rally, wait, "
+        "gather, return_cargo, distribute, train, produce_until, maintain_production, build, expand, addon, morph, research, repair, use_ability, "
         "scan, call_down_mule, supply_drop, transform, lift, land, load, unload, cancel, salvage, "
         "build_nuke, launch_nuke, or replan"
     )
@@ -801,7 +884,7 @@ def _parse_attack(
         unit_parts = parts[1:-1]
         if unit_parts and unit_parts[-1].lower() == "nearest":
             unit_parts = unit_parts[:-1]
-        unit = normalize_unit(" ".join(unit_parts)) if unit_parts else "marine"
+        unit = normalize_attack_actor(" ".join(unit_parts)) if unit_parts else "marine"
         return AttackEnemyCommand(unit=unit)
 
     if len(parts) == 3:
@@ -835,10 +918,9 @@ def _parse_patrol(parts: list[str], default_unit: str) -> PatrolCommand:
 def _parse_unit_order(
     parts: list[str], command_type, default_unit: str
 ) -> HoldPositionCommand | StopCommand:
+    normalizer = normalize_stop_actor if command_type is StopCommand else normalize_unit
     unit = (
-        normalize_unit(" ".join(parts[1:]))
-        if len(parts) > 1
-        else normalize_unit(default_unit)
+        normalizer(" ".join(parts[1:])) if len(parts) > 1 else normalizer(default_unit)
     )
     return command_type(unit=unit)
 
@@ -1283,9 +1365,17 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         raise StrategyParseError("each strategy JSON action must be an object")
 
     action_type = str(payload.get("type", "")).strip().lower()
-    if action_type in {"move", "move_target", "move-target", "follow"}:
+    if action_type in {
+        "move",
+        "move_target",
+        "move-target",
+        "follow",
+        "move_and_wait",
+        "move-and-wait",
+    }:
         unit = normalize_unit(str(payload.get("unit", default_unit)))
         is_target_action = action_type in {"move_target", "move-target", "follow"}
+        wait_for_arrival = action_type in {"move_and_wait", "move-and-wait"}
         target_unit = (
             _optional_target_unit_from_payload(payload)
             if is_target_action or "target_unit" in payload
@@ -1313,6 +1403,21 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             queued=_bool_from_payload(payload, "queued", default=False),
             target_unit=target_unit,
             target_tag=target_tag,
+            wait_for_arrival=wait_for_arrival,
+            arrival_tolerance=_bounded_number_from_payload(
+                payload,
+                "arrival_tolerance",
+                default=2.5,
+                minimum=0.25,
+                maximum=20,
+            ),
+            timeout_seconds=_bounded_number_from_payload(
+                payload,
+                "timeout_seconds",
+                default=90,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
+            ),
         )
 
     if action_type in {"attack", "attack_move", "attack-move"}:
@@ -1321,7 +1426,7 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             key in payload for key in ("target_unit", "target_tag")
         ):
             return AttackEnemyCommand(
-                unit=normalize_unit(str(payload.get("unit", default_unit))),
+                unit=normalize_attack_actor(str(payload.get("unit", default_unit))),
                 selection=_selection_from_payload(payload),
                 queued=_bool_from_payload(payload, "queued", default=False),
                 target_unit=_optional_attack_target_from_payload(payload),
@@ -1343,21 +1448,56 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
         "attack-enemy",
         "attack_target",
         "attack-target",
+        "focus_fire",
+        "focus-fire",
     }:
         target_unit = _optional_attack_target_from_payload(payload)
         target_tag = _optional_tag_from_payload(payload, "target_tag")
         if (
-            action_type in {"attack_target", "attack-target"}
+            action_type
+            in {"attack_target", "attack-target", "focus_fire", "focus-fire"}
             and target_unit is None
             and target_tag is None
         ):
             raise StrategyParseError("attack_target requires target_unit or target_tag")
         return AttackEnemyCommand(
-            unit=normalize_unit(str(payload.get("unit", "marine"))),
+            unit=normalize_attack_actor(str(payload.get("unit", "marine"))),
             selection=_selection_from_payload(payload),
             queued=_bool_from_payload(payload, "queued", default=False),
             target_unit=target_unit,
             target_tag=target_tag,
+            wait_for_target_death=action_type in {"focus_fire", "focus-fire"},
+            timeout_seconds=_bounded_number_from_payload(
+                payload,
+                "timeout_seconds",
+                default=60,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
+            ),
+        )
+
+    if action_type == "kite":
+        target_unit = _optional_attack_target_from_payload(payload)
+        target_tag = _optional_tag_from_payload(payload, "target_tag")
+        return KiteCommand(
+            unit=normalize_mobile_attack_unit(str(payload.get("unit", "marine"))),
+            target_unit=target_unit or "nearest_enemy",
+            target_tag=target_tag,
+            selection=_selection_from_payload(payload),
+            duration_seconds=_bounded_number_from_payload(
+                payload,
+                "duration_seconds",
+                default=8,
+                minimum=0.25,
+                maximum=30,
+            ),
+            retreat_distance=_bounded_number_from_payload(
+                payload,
+                "retreat_distance",
+                default=2,
+                minimum=0.5,
+                maximum=10,
+            ),
         )
 
     if action_type == "patrol":
@@ -1380,7 +1520,7 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
 
     if action_type == "stop":
         return StopCommand(
-            unit=normalize_unit(str(payload.get("unit", default_unit))),
+            unit=normalize_stop_actor(str(payload.get("unit", default_unit))),
             selection=_selection_from_payload(payload),
             queued=_bool_from_payload(payload, "queued", default=False),
         )
@@ -1491,6 +1631,42 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             ),
             producer_selection=_selection_from_payload_key(
                 payload, "producer_selection"
+            ),
+        )
+
+    if action_type in {
+        "produce_until",
+        "produce-until",
+        "maintain_production",
+        "maintain-production",
+    }:
+        return ProductionPolicyCommand(
+            unit=normalize_train_unit(str(payload.get("unit", ""))),
+            target_count=_positive_int_from_payload(
+                payload,
+                "target_count",
+                default=1,
+                max_count=MAX_SELECTION_COUNT,
+            ),
+            background=action_type in {"maintain_production", "maintain-production"},
+            producer_selection=_selection_from_payload_key(
+                payload, "producer_selection"
+            ),
+            reserve_minerals=_bounded_int_from_payload(
+                payload, "reserve_minerals", default=0, minimum=0, maximum=10000
+            ),
+            reserve_vespene=_bounded_int_from_payload(
+                payload, "reserve_vespene", default=0, minimum=0, maximum=10000
+            ),
+            reserve_supply=_bounded_int_from_payload(
+                payload, "reserve_supply", default=0, minimum=0, maximum=200
+            ),
+            max_seconds=_bounded_number_from_payload(
+                payload,
+                "max_seconds",
+                default=300,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
             ),
         )
 
@@ -1816,6 +1992,30 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
 
 def _action_to_dict(action: StrategyAction) -> dict[str, object]:
     if isinstance(action, MoveCommand):
+        if action.wait_for_arrival:
+            if action.target_unit is not None or action.target_tag is not None:
+                payload = _unit_command_payload(
+                    "move_and_wait", action.unit, action.selection, action.queued
+                )
+                if action.target_unit is not None:
+                    payload["target_unit"] = action.target_unit
+                if action.target_tag is not None:
+                    payload["target_tag"] = action.target_tag
+            else:
+                payload = _point_command_payload(
+                    "move_and_wait",
+                    action.unit,
+                    action.x,
+                    action.y,
+                    action.location,
+                    action.selection,
+                    action.queued,
+                )
+            if action.arrival_tolerance != 2.5:
+                payload["arrival_tolerance"] = action.arrival_tolerance
+            if action.timeout_seconds != 90:
+                payload["timeout_seconds"] = action.timeout_seconds
+            return payload
         if action.target_unit is not None or action.target_tag is not None:
             payload = _unit_command_payload(
                 "move_target",
@@ -1849,9 +2049,15 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         )
     if isinstance(action, AttackEnemyCommand):
         payload = _unit_command_payload(
-            "attack_target"
-            if action.target_unit is not None or action.target_tag is not None
-            else "attack_enemy",
+            (
+                "focus_fire"
+                if action.wait_for_target_death
+                else (
+                    "attack_target"
+                    if action.target_unit is not None or action.target_tag is not None
+                    else "attack_enemy"
+                )
+            ),
             action.unit,
             action.selection,
             action.queued,
@@ -1860,6 +2066,18 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
             payload["target_unit"] = action.target_unit
         if action.target_tag is not None:
             payload["target_tag"] = action.target_tag
+        if action.wait_for_target_death and action.timeout_seconds != 60:
+            payload["timeout_seconds"] = action.timeout_seconds
+        return payload
+    if isinstance(action, KiteCommand):
+        payload = _unit_command_payload("kite", action.unit, action.selection, False)
+        payload["target_unit"] = action.target_unit
+        if action.target_tag is not None:
+            payload["target_tag"] = action.target_tag
+        if action.duration_seconds != 8:
+            payload["duration_seconds"] = action.duration_seconds
+        if action.retreat_distance != 2:
+            payload["retreat_distance"] = action.retreat_distance
         return payload
     if isinstance(action, PatrolCommand):
         return _point_command_payload(
@@ -1909,6 +2127,16 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         }
         if action.target is not None:
             wait_payload["target"] = action.target
+        if action.location is not None:
+            wait_payload.update(_location_to_payload(action.location))
+        if action.radius != 12:
+            wait_payload["radius"] = action.radius
+        if action.selection is not None:
+            wait_payload["selection"] = _selection_to_payload(action.selection)
+        if action.timeout_seconds != 120:
+            wait_payload["timeout_seconds"] = action.timeout_seconds
+        if action.on_timeout != "replan":
+            wait_payload["on_timeout"] = action.on_timeout
         return wait_payload
     if isinstance(action, GatherMineralsCommand):
         gather_payload: dict[str, object] = {
@@ -1956,6 +2184,25 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
                 action.producer_selection
             )
         return train_payload
+    if isinstance(action, ProductionPolicyCommand):
+        policy_payload: dict[str, object] = {
+            "type": "maintain_production" if action.background else "produce_until",
+            "unit": action.unit,
+            "target_count": action.target_count,
+        }
+        if action.producer_selection is not None:
+            policy_payload["producer_selection"] = _selection_to_payload(
+                action.producer_selection
+            )
+        if action.reserve_minerals:
+            policy_payload["reserve_minerals"] = action.reserve_minerals
+        if action.reserve_vespene:
+            policy_payload["reserve_vespene"] = action.reserve_vespene
+        if action.reserve_supply:
+            policy_payload["reserve_supply"] = action.reserve_supply
+        if action.max_seconds != 300:
+            policy_payload["max_seconds"] = action.max_seconds
+        return policy_payload
     if isinstance(action, BuildStructureCommand):
         build_payload: dict[str, object] = {
             "type": "build",
@@ -2496,6 +2743,42 @@ def _required_number(payload: dict[str, Any], key: str) -> float:
         raise StrategyParseError(f"strategy JSON field must be numeric: {key}") from exc
 
 
+def _bounded_number_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+) -> float:
+    value = _required_number(payload, key) if key in payload else float(default)
+    if not minimum <= value <= maximum:
+        raise StrategyParseError(
+            f"strategy JSON field {key} must be between {minimum:g} and {maximum:g}"
+        )
+    return value
+
+
+def _bounded_int_from_payload(
+    payload: dict[str, Any],
+    key: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if key not in payload:
+        return default
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise StrategyParseError(f"strategy JSON field must be an integer: {key}")
+    if not minimum <= value <= maximum:
+        raise StrategyParseError(
+            f"strategy JSON field {key} must be between {minimum} and {maximum}"
+        )
+    return value
+
+
 def _optional_number(
     payload: dict[str, Any], keys: tuple[str, ...], default: float | None = None
 ) -> float:
@@ -2612,18 +2895,55 @@ def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
         raise StrategyParseError("wait-until threshold must not be negative")
 
     target: str | None = None
-    if condition.startswith("structure_"):
+    if condition.startswith("structure_") or condition == "idle_structure_count":
         target_value = payload.get(
             "target", payload.get("structure", payload.get("building", ""))
         )
         target = normalize_structure_target(str(target_value))
-    elif condition == "unit_count":
+    elif condition in {"unit_count", "unit_near_location"}:
         target_value = payload.get("target", payload.get("unit", ""))
         target = normalize_wait_unit(str(target_value))
+    elif condition == "producer_available":
+        target_value = payload.get("target", payload.get("unit", ""))
+        target = normalize_train_unit(str(target_value))
+    elif condition == "cargo_used":
+        target_value = payload.get("target", payload.get("actor", ""))
+        target = normalize_ability_actor(str(target_value))
+    elif condition == "enemy_near_location":
+        target_value = payload.get("target", payload.get("target_unit"))
+        target = (
+            normalize_enemy_target(str(target_value))
+            if target_value is not None
+            else None
+        )
     elif condition == "upgrade_complete":
         target_value = payload.get("target", payload.get("upgrade", ""))
         target = normalize_upgrade(str(target_value))
-    return WaitUntilCommand(condition=condition, target=target, at_least=at_least)
+    needs_location = condition in {"unit_near_location", "enemy_near_location"}
+    location = _location_from_payload(payload, required=needs_location)
+    if condition == "under_attack" and location is None:
+        location = LocationRef(semantic="own_main")
+    on_timeout = normalize_name(str(payload.get("on_timeout", "replan")))
+    if on_timeout not in {"replan", "fail"}:
+        raise StrategyParseError("wait-until on_timeout must be 'replan' or 'fail'")
+    return WaitUntilCommand(
+        condition=condition,
+        target=target,
+        at_least=at_least,
+        location=location,
+        radius=_bounded_number_from_payload(
+            payload, "radius", default=12, minimum=0.5, maximum=64
+        ),
+        selection=_selection_from_payload(payload),
+        timeout_seconds=_bounded_number_from_payload(
+            payload,
+            "timeout_seconds",
+            default=120,
+            minimum=1,
+            maximum=MAX_POLICY_SECONDS,
+        ),
+        on_timeout=on_timeout,
+    )
 
 
 def _looks_like_json(text: str) -> bool:
@@ -2704,6 +3024,21 @@ def normalize_wait_condition(condition: str) -> str:
         "unit": "unit_count",
         "units": "unit_count",
         "unit_count": "unit_count",
+        "army_supply": "army_supply",
+        "enemy_seen": "enemy_unit_count",
+        "enemy_count": "enemy_unit_count",
+        "enemy_unit_count": "enemy_unit_count",
+        "enemy_structure_count": "enemy_structure_count",
+        "idle_structure_count": "idle_structure_count",
+        "idle_producer": "producer_available",
+        "producer_available": "producer_available",
+        "cargo": "cargo_used",
+        "cargo_used": "cargo_used",
+        "unit_near": "unit_near_location",
+        "unit_near_location": "unit_near_location",
+        "enemy_near": "enemy_near_location",
+        "enemy_near_location": "enemy_near_location",
+        "under_attack": "under_attack",
         "townhall": "townhall_count",
         "townhalls": "townhall_count",
         "townhall_count": "townhall_count",
@@ -2747,6 +3082,7 @@ def normalize_production_structure(building: str) -> str:
         "barracks",
         "factory",
         "starport",
+        "bunker",
     }:
         raise StrategyParseError(f"structure cannot rally produced units: {building}")
     return normalized
@@ -2940,6 +3276,10 @@ def normalize_unit(unit: str) -> str:
             f"unsupported controllable Terran unit: {unit}"
         ) from exc
     key = resolved.key
+    if resolved.category == "special_unit" and key not in MOVABLE_SPECIAL_UNIT_KEYS:
+        raise StrategyParseError(
+            f"Terran special unit cannot receive basic movement orders: {unit}"
+        )
     if (
         resolved.category in {"structure", "morph"}
         and key not in FLYING_STRUCTURE_ACTOR_KEYS
@@ -2948,3 +3288,31 @@ def normalize_unit(unit: str) -> str:
             f"Terran structure cannot receive basic movement orders: {unit}"
         )
     return "worker" if key == "scv" else key
+
+
+def normalize_attack_actor(actor: str) -> str:
+    canonical = normalize_ability_actor(actor)
+    canonical = "scv" if canonical == "worker" else canonical
+    if canonical not in ATTACK_CAPABLE_UNIT_KEYS:
+        raise StrategyParseError(
+            f"Terran actor cannot receive basic attack orders: {actor}"
+        )
+    return "worker" if canonical == "scv" else canonical
+
+
+def normalize_mobile_attack_unit(unit: str) -> str:
+    canonical = normalize_attack_actor(unit)
+    catalog_key = "scv" if canonical == "worker" else canonical
+    if catalog_key not in MOBILE_ATTACK_CAPABLE_UNIT_KEYS:
+        raise StrategyParseError(f"Terran actor cannot kite while immobile: {unit}")
+    return canonical
+
+
+def normalize_stop_actor(actor: str) -> str:
+    try:
+        return normalize_unit(actor)
+    except StrategyParseError:
+        canonical = normalize_attack_actor(actor)
+        if canonical in {"planetary_fortress", "missile_turret", "auto_turret"}:
+            return canonical
+        raise

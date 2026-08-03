@@ -14,19 +14,19 @@ LLM이 임의의 Python 코드나 SC2 API를 직접 호출하지 않습니다. �
 
 기존 18개 매크로/제어 명령만으로는 표준 Terran 게임을 표현하기에 부족했습니다. Orbital 스캔/MULE, Siege Tank 모드 전환, Medivac 드랍, Raven/Battlecruiser 능력, lift/land, load/unload, nuke, cancel/salvage 같은 핵심 Terran 상호작용이 모두 빠져 있었기 때문입니다.
 
-`starcraft_llm/commands.py`는 현재 **36개 provider-neutral 함수 호출 명령**을 노출합니다. 기존 18개 함수 이름과 좌표 호출은 유지하면서, 정확한 tag 기반 actor/target 선택, 집중 공격, 아군 추종, 자원 반환, wall placement, add-on swap과 능력 명령을 확장했습니다.
+`starcraft_llm/commands.py`는 현재 **41개 provider-neutral 함수 호출 명령**을 노출합니다. 기존 18개 함수 이름과 좌표 호출은 유지하면서, 정확한 tag 기반 actor/target 선택, 도착·처치 완료 동기화, bounded 카이팅, 지속 생산, 자원 반환, wall placement, add-on swap과 능력 명령을 확장했습니다.
 
 | 영역 | 함수 | 의미 |
 | --- | --- | --- |
-| 이동/전투 | `move`, `move_target`, `attack_move`, `attack_enemy`, `attack_target`, `patrol`, `hold_position`, `stop` | 지점 이동, 아군 추종, 적 type/selector/tag 집중 공격 및 lift된 건물 이동 |
-| 집결/대기 | `rally`, `wait`, `wait_until` | 생산 건물 집결지와 상태 기반 대기 |
+| 이동/전투 | `move`, `move_target`, `move_and_wait`, `attack_move`, `attack_enemy`, `attack_target`, `focus_fire`, `kite`, `patrol`, `hold_position`, `stop` | 지점 이동, 도착 확인, 아군 추종, 적 type/selector/tag 공격, 처치 확인, 쿨다운 기반 bounded 카이팅 |
+| 집결/대기 | `rally`, `wait`, `wait_until` | 생산 건물·벙커 집결지와 자원/병력/적/위치/수송/피격 상태 기반 대기 |
 | 경제 | `gather`, `return_cargo`, `distribute_workers` | 특정 자원 tag 채취, 화물 반환과 일꾼 재분배 |
-| 생산/건설 | `train`, `build`, `expand`, `build_addon` | 유닛 생산, 건물·확장·애드온 건설 |
+| 생산/건설 | `train`, `produce_until`, `maintain_production`, `build`, `expand`, `build_addon` | 고정 batch, 목표 수까지 blocking 생산, 이후 행동과 병행하는 background 생산, 건물·확장·애드온 건설 |
 | 테크/유지 | `morph`, `research`, `repair` | 사령부 변환, 업그레이드 연구, 수리 |
 | 정적 능력 | `use_ability` | `ABILITY_SPECS`에 등록된 Terran 능력만 직접 사용 |
 | 능력 래퍼 | `scan`, `call_down_mule`, `supply_drop`, `transform`, `lift`, `land`, `land_on_addon`, `load`, `unload`, `cancel`, `salvage`, `build_nuke`, `launch_nuke`, `replan` | 자주 쓰는 능력, add-on swap, 개별 수송/하차를 typed wrapper로 표현 |
 
-`llm_command_function_schemas()`는 이 36개 함수를 JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
+`llm_command_function_schemas()`는 이 41개 함수를 JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
 
 ```python
 from starcraft_llm.commands import strategy_plan_from_function_calls
@@ -47,13 +47,13 @@ plan = strategy_plan_from_function_calls(
 `starcraft_llm/command_catalog.py`가 LLM prompt, 파서, 검증기, 실행기의 단일 명칭/비용/선행 조건 소스입니다. 영어·한국어 별칭을 canonical snake_case 키로 정규화합니다.
 
 - 생산 가능한 표준 유닛 17종: SCV, Marine, Marauder, Reaper, Ghost, Hellion, Hellbat, Widow Mine, Cyclone, Siege Tank, Thor, Viking, Medivac, Liberator, Raven, Banshee, Battlecruiser
-- 소환 제어 유닛 1종: MULE (`move`/`patrol`/`hold`/`stop`, 미네랄 채취, 기계 유닛·건물 수리)
+- 소환 제어 유닛 2종: MULE(이동·채취·수리)과 Raven Auto Turret(공격·집중 공격·hold/stop)
 - 비행 이동 건물 5종: lift된 Command Center, Orbital Command, Barracks, Factory, Starport (`move`/`patrol`/`hold`/`stop`; grounded form은 실행기에서 제외)
 - 건물 13종: Command Center, Supply Depot, Refinery, Barracks, Engineering Bay, Bunker, Missile Turret, Sensor Tower, Factory, Ghost Academy, Starport, Armory, Fusion Core
 - 애드온 6종: Barracks/Factory/Starport의 Tech Lab과 Reactor
 - 사령부 변환 2종: Orbital Command, Planetary Fortress
 - Terran 업그레이드 31종: 보병·차량·함선 공방업과 Stimpack, Combat Shield, Cloaking, Yamato 등
-- Terran 능력 82종: 아래 allowlist만 `use_ability` 또는 typed wrapper로 사용 가능
+- Terran 능력 83종: 아래 allowlist만 `use_ability` 또는 typed wrapper로 사용 가능
 
 카탈로그 메타데이터는 [SC2 5.0.15](https://news.blizzard.com/en-us/article/24225313/starcraft-ii-5-0-15-patch-notes) 기준으로 고정되어 있고, 모든 enum 이름은 프로젝트 `.venv`에 설치된 BurnySC2의 `UnitTypeId`/`UpgradeId`/`AbilityId`와 대조합니다. BurnySC2가 없는 별도 Python 환경에서만 enum 대조 테스트가 skip됩니다.
 
@@ -65,7 +65,7 @@ plan = strategy_plan_from_function_calls(
 | --- | --- |
 | 보병/은폐/유닛 능력 | `stim_marine`, `stim_marauder`, `kd8_charge`, `ghost_cloak_on`, `ghost_cloak_off`, `ghost_hold_fire_on`, `ghost_hold_fire_off`, `ghost_snipe`, `ghost_emp`, `ghost_nuke_call_down`, `banshee_cloak_on`, `banshee_cloak_off`, `medivac_afterburners`, `medivac_heal` |
 | 모드 전환 | `morph_hellbat`, `morph_hellion`, `siege_mode`, `unsiege_mode`, `thor_high_impact_mode`, `thor_explosive_mode`, `viking_assault_mode`, `viking_fighter_mode`, `liberator_ag_mode`, `liberator_aa_mode`, `lower_supply_depot`, `raise_supply_depot` |
-| 고급 전투 능력 | `widow_mine_burrow_down`, `widow_mine_burrow_up`, `cyclone_lock_on`, `cyclone_cancel_lock_on`, `raven_auto_turret`, `raven_interference_matrix`, `raven_anti_armor_missile`, `battlecruiser_tactical_jump`, `battlecruiser_yamato` |
+| 고급 전투 능력 | `widow_mine_burrow_down`, `widow_mine_burrow_up`, `widow_mine_attack`, `cyclone_lock_on`, `cyclone_cancel_lock_on`, `raven_auto_turret`, `raven_interference_matrix`, `raven_anti_armor_missile`, `battlecruiser_tactical_jump`, `battlecruiser_yamato` |
 | Orbital Command | `scan`, `call_down_mule`, `supply_drop` |
 | MULE | `mule_gather`, `mule_repair` |
 | 건물 lift/land | `lift_command_center`, `land_command_center`, `lift_orbital_command`, `land_orbital_command`, `lift_barracks`, `land_barracks`, `lift_factory`, `land_factory`, `lift_starport`, `land_starport` |
@@ -104,7 +104,9 @@ nearest_enemy, nearest_enemy_structure, nearest_mineral
 {"selection": {"mode": "highest_energy", "count": 1, "tags": [12345]}}
 ```
 
-허용 mode는 `all`, `ready`, `idle`, `closest`, `lowest_health`, `highest_energy`입니다. `selection.tags`는 관측 payload의 실제 unit tag로 actor를 정확히 고릅니다. `target_selection`, `producer_selection`, `researcher_selection`도 같은 형식을 사용합니다. `selection.count`와 유닛 생산 count 상한은 200입니다. 전체 plan은 최대 24 actions, 건물·애드온·확장 count는 최대 20, worker 배정·수리 count는 최대 100입니다. 좌표는 0~256 범위, `wait`는 최대 30초입니다. 긴 반복은 action 복제 대신 `count`, bounded `selection`, `wait_until`, `replan` checkpoint로 나눠야 합니다.
+허용 mode는 `all`, `ready`, `idle`, `closest`, `lowest_health`, `highest_energy`입니다. `selection.tags`는 관측 payload의 실제 unit tag로 actor를 정확히 고릅니다. `target_selection`, `producer_selection`, `researcher_selection`도 같은 형식을 사용합니다. `selection.count`와 유닛 생산 count 상한은 200입니다. 전체 plan은 최대 24 actions, 건물·애드온·확장 count는 최대 20, worker 배정·수리 count는 최대 100입니다. 좌표는 0~256 범위, 단순 `wait`는 최대 30초이며 동적 대기·생산 정책은 timeout을 반드시 갖고 최대 1200초로 제한됩니다. 긴 반복은 action 복제 대신 `count`, `produce_until`, `maintain_production`, bounded `wait_until`, `replan` checkpoint로 표현합니다.
+
+`wait_until`은 자원/보급/게임 시간뿐 아니라 `army_supply`, 적 유닛·건물 수, idle 생산 건물, 생산 가능 슬롯, 수송 화물, 특정 위치 주변 아군·적, 기지 피격 상태를 관측합니다. 위치 조건에는 `radius`, 모든 동적 조건에는 `timeout_seconds`와 `on_timeout`(`replan` 또는 `fail`)을 지정할 수 있습니다.
 
 건설은 기본 `placement_mode="near"` 외에 `placement_mode="exact"`, `max_distance`, `reserve_addon_space`를 지원합니다. own-ramp semantic slot과 함께 쓰면 depot/barracks wall 위치를 정확히 요청할 수 있습니다. `land_on_addon`은 관측된 add-on type/tag의 `add_on_land_position`으로 생산 건물을 내려 add-on swap을 수행합니다.
 
@@ -177,7 +179,7 @@ cancel queue 1; salvage bunker; build nuke; launch nuke enemy main; replan abili
   "actions": [
     {"type": "load", "transport": "medivac", "unit": "marine", "count": 8},
     {"type": "use_ability", "ability": "medivac_afterburners", "actor": "medivac", "selection": {"count": 1}},
-    {"type": "move", "unit": "medivac", "location": "enemy_main"},
+    {"type": "move_and_wait", "unit": "medivac", "location": "enemy_main", "timeout_seconds": 90},
     {"type": "unload", "transport": "medivac", "location": "enemy_main"}
   ]
 }
@@ -219,6 +221,8 @@ cancel queue 1; salvage bunker; build nuke; launch nuke enemy main; replan abili
 - 건설 시작과 `wait_until structure_ready`를 구분
 - 업그레이드 비용, 연구 건물, 선행 레벨 및 완료 대기 검증
 - gas 채취, expansion, morph, repair, rally 대상 검증
+- blocking/background 생산 정책의 절대 목표 수, 자원·가스·보급 reserve, timeout 검증
+- 도착 확인, 처치 확인, bounded 카이팅, 위치/적/수송/피격 조건의 target shape 검증
 - ability key, actor, target shape, semantic location, selector, queued flag 검증
 - 알 수 없는 명령·유닛·건물·업그레이드·능력 거부
 
@@ -303,9 +307,9 @@ npm run test:all
 - 기존 18개 함수 이름, JSON root shape `{"actions": [...]}`, JSON action array shortcut, OpenAI-style nested function-call adapter는 유지됩니다.
 - `openai` planner와 외부 `server` planner 클라이언트는 아직 연결되지 않았지만, 공통 함수 schema와 adapter는 준비되어 있습니다.
 - 현재 범위는 **Terran standard melee command surface**입니다. 표준 Terran 유닛·건물·업그레이드·능력 표현을 넓힌 것이며, 임의 SC2 API 호출, 비-Terran 종족, 커스텀 모드, 임의 adaptive ladder AI를 의미하지 않습니다.
-- 실시간 멀티 사이클 전략 지능, 적 조합에 따른 장기 전략 전환, 완성형 래더 승률 보장은 범위 밖입니다.
+- 함수 표면은 bounded 멀티 프레임 생산·이동·전투·조건 관측을 제공하지만, 적 조합에 따른 장기 전략 선택과 완성형 래더 승률은 플래너/정책 품질의 문제이며 보장하지 않습니다.
 - wall slot과 exact placement는 지원하지만, 해당 ramp 속성을 제공하지 않는 맵이나 막힌 위치에서는 재시도/재계획하며 모든 맵의 최적 wall을 보장하지 않습니다.
-- SC2가 플레이어 명령으로 노출하지 않는 자동 공격/내부 ability는 함수로 가장하지 않습니다. 예를 들어 Widow Mine은 매설/해제와 위치 제어를 제공하고 발사는 게임의 자동 타게팅에 맡깁니다.
+- SC2가 플레이어 명령으로 노출하지 않는 자동 공격/내부 ability는 함수로 가장하지 않습니다. 다만 BurnySC2가 실제 플레이어 명령으로 노출하는 매설 Widow Mine의 명시적 target fire는 `widow_mine_attack`으로 제공합니다.
 - BurnySC2가 여러 queue-cancel enum을 같은 `CANCEL_LAST` 동작으로 redirect하는 경우에는 관측 order ID로 임의 queue index 하나만 취소한다고 보장하지 않습니다.
 - live ability availability는 executor가 확인하지만, 그것이 전투 micro 품질이나 승리를 보장하지 않습니다.
 

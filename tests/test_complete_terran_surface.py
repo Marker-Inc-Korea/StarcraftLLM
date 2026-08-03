@@ -36,7 +36,10 @@ LEGACY_FUNCTIONS = {
 
 NEW_FUNCTIONS = {
     "move_target",
+    "move_and_wait",
     "attack_target",
+    "focus_fire",
+    "kite",
     "use_ability",
     "scan",
     "call_down_mule",
@@ -53,6 +56,8 @@ NEW_FUNCTIONS = {
     "launch_nuke",
     "replan",
     "return_cargo",
+    "produce_until",
+    "maintain_production",
 }
 
 EXPECTED_PUBLIC_FUNCTIONS = LEGACY_FUNCTIONS | NEW_FUNCTIONS
@@ -97,6 +102,7 @@ EXPECTED_ABILITIES = {
     "morph_hellion": ("MORPH_HELLION", "none"),
     "widow_mine_burrow_down": ("BURROWDOWN_WIDOWMINE", "none"),
     "widow_mine_burrow_up": ("BURROWUP_WIDOWMINE", "none"),
+    "widow_mine_attack": ("WIDOWMINEATTACK_WIDOWMINEATTACK", "unit"),
     "cyclone_lock_on": ("LOCKON_LOCKON", "unit"),
     "cyclone_cancel_lock_on": ("CANCEL_LOCKON", "none"),
     "siege_mode": ("SIEGEMODE_SIEGEMODE", "none"),
@@ -295,10 +301,16 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
     def test_every_new_llm_command_function_constructs_a_strategy_action(self):
         arguments = {
             "move_target": {"unit": "medivac", "target_tag": 77},
+            "move_and_wait": {"unit": "medivac", "location": "enemy_main"},
             "attack_target": {
                 "unit": "marine",
                 "target_unit": "nearest_enemy",
             },
+            "focus_fire": {
+                "unit": "marine",
+                "target_unit": "nearest_enemy",
+            },
+            "kite": {"unit": "marine"},
             "use_ability": {
                 "ability": "stim_marine",
                 "actor": "marine",
@@ -322,6 +334,8 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
             "launch_nuke": {"location": "enemy_main"},
             "replan": {"reason": "ability_unavailable"},
             "return_cargo": {"unit": "worker"},
+            "produce_until": {"unit": "marine", "target_count": 16},
+            "maintain_production": {"unit": "marine", "target_count": 16},
         }
 
         for name in NEW_FUNCTIONS:

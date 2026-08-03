@@ -14,13 +14,16 @@ from starcraft_llm.command_catalog import (
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
     MAX_PLAN_ACTIONS,
+    MAX_POLICY_SECONDS,
     MAX_REPLAN_CYCLES,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
     MECHANICAL_UNIT_KEYS,
     MEDIVAC_LOADABLE_UNIT_KEYS,
+    MOBILE_ATTACK_CAPABLE_UNIT_KEYS,
     MORPH_SPECS,
+    MOVABLE_SPECIAL_UNIT_KEYS,
     PSIONIC_UNIT_KEYS,
     REPAIRABLE_TARGET_KEYS,
     SPECIAL_UNIT_SPECS,
@@ -44,9 +47,11 @@ from starcraft_llm.strategy import (
     GatherGasCommand,
     GatherMineralsCommand,
     HoldPositionCommand,
+    KiteCommand,
     MorphStructureCommand,
     MoveCommand,
     PatrolCommand,
+    ProductionPolicyCommand,
     RallyCommand,
     RepairCommand,
     ReplanCommand,
@@ -78,6 +83,15 @@ _SUPPORTED_WAIT_CONDITIONS = {
     "townhall_count",
     "upgrade_complete",
     "game_time",
+    "army_supply",
+    "enemy_unit_count",
+    "enemy_structure_count",
+    "idle_structure_count",
+    "producer_available",
+    "cargo_used",
+    "unit_near_location",
+    "enemy_near_location",
+    "under_attack",
 }
 
 DEFAULT_MAX_ACTIONS = MAX_PLAN_ACTIONS
@@ -118,12 +132,31 @@ class _PlanState:
     upgrades: set[str]
     upgrades_planned: set[str]
     semantic_locations: dict[str, object | None]
+    production_targets: dict[str, int]
+    production_policies: dict[str, ProductionPolicyCommand]
 
     @classmethod
     def from_summary(cls, summary: GameStateSummary | None) -> "_PlanState":
         if summary is None:
             return cls(
-                False, 0, 0, 0, 0, 0, 0, 0, 0.0, {}, {}, {}, {}, set(), set(), {}
+                False,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0.0,
+                {},
+                {},
+                {},
+                {},
+                set(),
+                set(),
+                {},
+                {},
+                {},
             )
 
         structures = _canonical_counts(
@@ -167,6 +200,8 @@ class _PlanState:
             upgrades,
             set(),
             dict(summary.semantic_locations),
+            {},
+            {},
         )
 
     def spend(self, spec: EntitySpec, count: int, index: int, action_name: str) -> None:
@@ -264,6 +299,9 @@ def validate_strategy_plan(
             _validate_selection(action.selection, index)
             _validate_attack_target(action, index)
             _validate_queued(action, index)
+            _validate_focus_fire(action, index)
+        elif isinstance(action, KiteCommand):
+            _validate_kite(action, index, state)
         elif isinstance(action, PatrolCommand):
             _validate_point_action(
                 action,
@@ -302,6 +340,8 @@ def validate_strategy_plan(
             _validate_distribute_workers(action, index, state)
         elif isinstance(action, TrainUnitCommand):
             _validate_train(action, index, state)
+        elif isinstance(action, ProductionPolicyCommand):
+            _validate_production_policy(action, index, state)
         elif isinstance(action, BuildStructureCommand):
             _validate_build(action, index, state, min_coordinate, max_coordinate)
         elif isinstance(action, ExpandCommand):
@@ -338,6 +378,12 @@ def _validate_point_action(
     max_coordinate: float,
 ) -> None:
     _validate_unit(unit, index, action_name)
+    if action_name == "attack":
+        key = "scv" if unit == "worker" else unit
+        if key not in MOBILE_ATTACK_CAPABLE_UNIT_KEYS:
+            raise PlanValidationError(
+                f"action {index}: immobile actor {unit} cannot attack-move"
+            )
     _validate_selection(getattr(action, "selection", None), index)
     _validate_queued(action, index)
     _validate_location_or_point(
@@ -358,6 +404,16 @@ def _validate_move(
     max_coordinate: float,
 ) -> None:
     _validate_unit(action.unit, index, "move")
+    if action.wait_for_arrival:
+        _validate_bounded_seconds(
+            action.timeout_seconds, index, "move-and-wait timeout"
+        )
+        if not math.isfinite(action.arrival_tolerance) or not (
+            0.25 <= action.arrival_tolerance <= 20
+        ):
+            raise PlanValidationError(
+                f"action {index}: move-and-wait arrival tolerance must be between 0.25 and 20"
+            )
     _validate_selection(action.selection, index)
     _validate_queued(action, index)
     target_unit = getattr(action, "target_unit", None)
@@ -429,6 +485,40 @@ def _validate_attack_target(action: AttackEnemyCommand, index: int) -> None:
         )
 
 
+def _validate_focus_fire(action: AttackEnemyCommand, index: int) -> None:
+    if not action.wait_for_target_death:
+        return
+    if action.target_unit is None and action.target_tag is None:
+        raise PlanValidationError(
+            f"action {index}: focus fire requires target_unit or target_tag"
+        )
+    _validate_bounded_seconds(action.timeout_seconds, index, "focus-fire timeout")
+
+
+def _validate_kite(action: KiteCommand, index: int, state: _PlanState) -> None:
+    del state
+    _validate_unit(action.unit, index, "kite")
+    catalog_key = "scv" if action.unit == "worker" else action.unit
+    if catalog_key not in MOBILE_ATTACK_CAPABLE_UNIT_KEYS:
+        raise PlanValidationError(
+            f"action {index}: immobile actor {action.unit} cannot kite"
+        )
+    _validate_selection(action.selection, index)
+    _validate_attack_target(cast(AttackEnemyCommand, action), index)
+    if not math.isfinite(action.duration_seconds) or not (
+        0.25 <= action.duration_seconds <= 30
+    ):
+        raise PlanValidationError(
+            f"action {index}: kite duration must be between 0.25 and 30 seconds"
+        )
+    if not math.isfinite(action.retreat_distance) or not (
+        0.5 <= action.retreat_distance <= 10
+    ):
+        raise PlanValidationError(
+            f"action {index}: kite retreat distance must be between 0.5 and 10"
+        )
+
+
 def _validate_point(
     x: float,
     y: float,
@@ -452,23 +542,38 @@ def _validate_point(
 
 def _validate_unit(unit: str, index: int, action_name: str) -> None:
     key = "scv" if unit == "worker" else unit
+    if action_name.startswith("attack") or action_name == "kite":
+        if key in ATTACK_CAPABLE_UNIT_KEYS:
+            return
+        raise PlanValidationError(
+            f"action {index}: {unit} cannot issue an attack command"
+        )
+    if action_name == "stop" and key in {
+        "planetary_fortress",
+        "missile_turret",
+        "auto_turret",
+    }:
+        return
     if key in FLYING_STRUCTURE_ACTOR_KEYS:
         if action_name in {"move", "patrol", "hold", "stop"}:
             return
         raise PlanValidationError(
             f"action {index}: {unit} cannot issue an {action_name} command"
         )
-    if key in SPECIAL_UNIT_SPECS and action_name.startswith("attack"):
+    if key in SPECIAL_UNIT_SPECS and key not in MOVABLE_SPECIAL_UNIT_KEYS:
         raise PlanValidationError(
-            f"action {index}: {unit} cannot issue an attack command"
+            f"action {index}: {unit} cannot issue a {action_name} command"
         )
     if key not in UNIT_SPECS and key not in SPECIAL_UNIT_SPECS:
         raise PlanValidationError(
             f"action {index}: unsupported {action_name} unit: {unit}"
         )
-    if action_name.startswith("attack") and key not in ATTACK_CAPABLE_UNIT_KEYS:
+
+
+def _validate_bounded_seconds(value: float, index: int, field_name: str) -> None:
+    if not math.isfinite(value) or not 1 <= value <= MAX_POLICY_SECONDS:
         raise PlanValidationError(
-            f"action {index}: {unit} cannot issue an attack command"
+            f"action {index}: {field_name} must be between 1 and {MAX_POLICY_SECONDS} seconds"
         )
 
 
@@ -502,6 +607,16 @@ def _validate_wait_until(
         raise PlanValidationError(
             f"action {index}: wait-until threshold is too high for the MVP"
         )
+    _validate_bounded_seconds(action.timeout_seconds, index, "wait-until timeout")
+    if action.on_timeout not in {"replan", "fail"}:
+        raise PlanValidationError(
+            f"action {index}: wait-until on_timeout must be replan or fail"
+        )
+    if not math.isfinite(action.radius) or not 0.5 <= action.radius <= 64:
+        raise PlanValidationError(
+            f"action {index}: wait-until radius must be between 0.5 and 64"
+        )
+    _validate_selection(action.selection, index)
 
     needs_target = {
         "structure_count",
@@ -509,11 +624,27 @@ def _validate_wait_until(
         "structure_pending",
         "unit_count",
         "upgrade_complete",
+        "idle_structure_count",
+        "producer_available",
+        "cargo_used",
+        "unit_near_location",
     }
     if action.condition in needs_target and not action.target:
         raise PlanValidationError(
             f"action {index}: wait-until {action.condition} requires a target"
         )
+    if action.condition in {"unit_near_location", "enemy_near_location"}:
+        if action.location is None:
+            raise PlanValidationError(
+                f"action {index}: wait-until {action.condition} requires a location"
+            )
+        _validate_location_or_point(action, index, state, action.condition, 0, 256)
+    elif action.location is not None:
+        if action.condition != "under_attack":
+            raise PlanValidationError(
+                f"action {index}: wait-until {action.condition} does not use a location"
+            )
+        _validate_location_or_point(action, index, state, action.condition, 0, 256)
     if not state.known:
         return
 
@@ -539,6 +670,18 @@ def _validate_wait_until(
     if action.condition == "game_time":
         state.game_time = max(state.game_time, action.at_least)
         return
+    if action.condition in {
+        "army_supply",
+        "enemy_unit_count",
+        "enemy_structure_count",
+        "idle_structure_count",
+        "producer_available",
+        "cargo_used",
+        "unit_near_location",
+        "enemy_near_location",
+        "under_attack",
+    }:
+        return
     if action.condition == "townhall_count":
         if state.townhalls < threshold:
             raise PlanValidationError(
@@ -549,9 +692,24 @@ def _validate_wait_until(
         target = action.target or ""
         current = state.workers if target == "worker" else state.units.get(target, 0)
         if current < threshold:
-            raise PlanValidationError(
-                f"action {index}: cannot wait for {threshold:g} {target} unit(s); "
-                f"only {current:g} are currently known or planned"
+            planned = state.production_targets.get(target, 0)
+            if planned < threshold:
+                raise PlanValidationError(
+                    f"action {index}: cannot wait for {threshold:g} {target} unit(s); "
+                    f"only {current:g} are currently known or planned"
+                )
+            policy = state.production_policies.get(target)
+            if policy is None:
+                raise PlanValidationError(
+                    f"action {index}: production target {target} has no bounded policy"
+                )
+            _materialize_production_target(
+                state,
+                target,
+                threshold,
+                policy,
+                index,
+                f"wait for {threshold} {target}",
             )
         return
     if action.condition == "upgrade_complete":
@@ -715,6 +873,113 @@ def _validate_train(action: TrainUnitCommand, index: int, state: _PlanState) -> 
         state.units[unit_key] = state.units.get(unit_key, 0) + action.count
         if action.unit == "scv":
             state.workers += action.count
+
+
+def _validate_production_policy(
+    action: ProductionPolicyCommand, index: int, state: _PlanState
+) -> None:
+    if action.unit not in UNIT_SPECS:
+        raise PlanValidationError(
+            f"action {index}: unsupported production-policy unit: {action.unit}"
+        )
+    _validate_count(
+        action.target_count,
+        index,
+        "production target",
+        max_count=MAX_TRAIN_OR_SELECTION_COUNT,
+    )
+    _validate_selection(action.producer_selection, index)
+    _validate_bounded_seconds(action.max_seconds, index, "production-policy timeout")
+    for field_name, value, maximum in (
+        ("reserve_minerals", action.reserve_minerals, 10000),
+        ("reserve_vespene", action.reserve_vespene, 10000),
+        ("reserve_supply", action.reserve_supply, 200),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or not 0 <= value <= maximum
+        ):
+            raise PlanValidationError(
+                f"action {index}: {field_name} must be an integer between 0 and {maximum}"
+            )
+
+    spec = UNIT_SPECS[action.unit]
+    action_name = f"produce {action.unit} until {action.target_count}"
+    if state.known:
+        if action.unit == "scv" and state.townhalls < 1:
+            raise PlanValidationError(
+                f"action {index}: cannot produce SCVs without a townhall"
+            )
+        if spec.producer and spec.producer != "command_center":
+            state.require_ready(spec.producer, index, action_name)
+        for prerequisite in spec.prerequisites:
+            state.require_ready(prerequisite, index, action_name)
+        if spec.required_addon:
+            state.require_ready(spec.required_addon, index, action_name)
+
+    target_key = "worker" if action.unit == "scv" else action.unit
+    previous_target = state.production_targets.get(target_key, 0)
+    if action.target_count >= previous_target:
+        state.production_targets[target_key] = action.target_count
+        state.production_policies[target_key] = action
+    if state.known and not action.background:
+        _materialize_production_target(
+            state,
+            target_key,
+            action.target_count,
+            action,
+            index,
+            action_name,
+        )
+
+
+def _materialize_production_target(
+    state: _PlanState,
+    target_key: str,
+    target_count: int,
+    policy: ProductionPolicyCommand,
+    index: int,
+    action_name: str,
+) -> None:
+    """Conservatively reflect a blocking production barrier in plan state.
+
+    Minerals and gas may accrue while the bounded policy waits, so an initially
+    low balance is not terminal. Once the barrier completes, however, its
+    configured reserves are the only guaranteed balance. Supply cannot accrue
+    without an explicit prior supply action and is therefore checked strictly.
+    """
+
+    current = (
+        state.workers if target_key == "worker" else state.units.get(target_key, 0)
+    )
+    missing = max(0, target_count - current)
+    if missing == 0:
+        return
+
+    unit_key = "scv" if target_key == "worker" else target_key
+    spec = UNIT_SPECS[unit_key]
+    supply_cost = int((spec.supply or 0) * missing)
+    required_supply = supply_cost + policy.reserve_supply
+    if state.supply_left < required_supply:
+        raise PlanValidationError(
+            f"action {index}: cannot {action_name} with only {state.supply_left} "
+            f"supply left; requires {supply_cost} plus {policy.reserve_supply} reserve"
+        )
+
+    state.minerals = max(
+        policy.reserve_minerals,
+        state.minerals - spec.minerals * missing,
+    )
+    state.vespene = max(
+        policy.reserve_vespene,
+        state.vespene - spec.vespene * missing,
+    )
+    state.supply_used += supply_cost
+    state.supply_left -= supply_cost
+    if target_key == "worker":
+        state.workers = target_count
+    state.units[target_key] = target_count
 
 
 def _validate_build(
@@ -935,6 +1200,7 @@ def _validate_rally(
         "barracks",
         "factory",
         "starport",
+        "bunker",
     }:
         raise PlanValidationError(
             f"action {index}: unsupported rally structure: {action.building}"
@@ -1069,9 +1335,19 @@ def _validate_ability_action(
 
     _validate_selection(getattr(action, "selection", None), index)
     _validate_queued(action, index)
-    _validate_ability_target(
-        action, target_kind, index, state, ability_key, min_coordinate, max_coordinate
+    implicit_medivac_unload = (
+        ability_key == "unload_all_medivac" and not _has_point_target(action)
     )
+    if not implicit_medivac_unload:
+        _validate_ability_target(
+            action,
+            target_kind,
+            index,
+            state,
+            ability_key,
+            min_coordinate,
+            max_coordinate,
+        )
     _validate_ability_target_filter(action, spec, index, ability_key)
     _validate_ability_prerequisites(action, spec, actor, index, state, ability_key)
     _apply_ability_state_effect(ability_key, state)
