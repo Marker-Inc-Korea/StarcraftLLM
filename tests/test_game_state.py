@@ -23,6 +23,9 @@ class GameStateSummaryTest(unittest.TestCase):
             structures_pending={"barracks": 1},
             known_enemy_units=0,
             game_time_seconds=3.5,
+            enemy_race="zerg",
+            map_name="AbyssalReefLE",
+            active_alerts=("nuclear_launch_detected",),
         )
 
         self.assertEqual(
@@ -40,6 +43,9 @@ class GameStateSummaryTest(unittest.TestCase):
                 "upgrades": [],
                 "known_enemy_units": 0,
                 "game_time_seconds": 3.5,
+                "enemy_race": "zerg",
+                "map_name": "AbyssalReefLE",
+                "active_alerts": ["nuclear_launch_detected"],
             },
         )
 

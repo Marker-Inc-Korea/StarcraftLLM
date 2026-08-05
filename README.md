@@ -14,19 +14,20 @@ LLM이 임의의 Python 코드나 SC2 API를 직접 호출하지 않습니다. �
 
 기존 18개 매크로/제어 명령만으로는 표준 Terran 게임을 표현하기에 부족했습니다. Orbital 스캔/MULE, Siege Tank 모드 전환, Medivac 드랍, Raven/Battlecruiser 능력, lift/land, load/unload, nuke, cancel/salvage 같은 핵심 Terran 상호작용이 모두 빠져 있었기 때문입니다.
 
-`starcraft_llm/commands.py`는 현재 **41개 provider-neutral 함수 호출 명령**을 노출합니다. 기존 18개 함수 이름과 좌표 호출은 유지하면서, 정확한 tag 기반 actor/target 선택, 도착·처치 완료 동기화, bounded 카이팅, 지속 생산, 자원 반환, wall placement, add-on swap과 능력 명령을 확장했습니다.
+`starcraft_llm/commands.py`는 현재 **50개 provider-neutral 함수 호출 명령**을 노출합니다. 기존 18개 함수 이름과 좌표 호출은 유지하면서, 정확한 tag 기반 actor/target 선택, 도착·처치·지역 소탕 완료 동기화, 조건 분기, bounded 반복·sequence timeout, 지속 생산, 자원 반환, wall placement, add-on swap과 능력 명령을 확장했습니다.
 
 | 영역 | 함수 | 의미 |
 | --- | --- | --- |
-| 이동/전투 | `move`, `move_target`, `move_and_wait`, `attack_move`, `attack_enemy`, `attack_target`, `focus_fire`, `kite`, `patrol`, `hold_position`, `stop` | 지점 이동, 도착 확인, 아군 추종, 적 type/selector/tag 공격, 처치 확인, 쿨다운 기반 bounded 카이팅 |
-| 집결/대기 | `rally`, `wait`, `wait_until` | 생산 건물·벙커 집결지와 자원/병력/적/위치/수송/피격 상태 기반 대기 |
+| 이동/전투 | `move`, `move_target`, `move_and_wait`, `attack_move`, `attack_enemy`, `attack_target`, `focus_fire`, `attack_until_clear`, `kite`, `patrol`, `hold_position`, `stop` | 지점 이동, 도착 확인, 아군 추종, 적 또는 중립 파괴물 type/selector/tag 공격, 처치·지역 소탕 확인, 쿨다운 기반 bounded 카이팅 |
+| 집결/동기화 | `rally`, `wait`, `wait_until`, `wait_for_ability`, `wait_for_form`, `wait_for_idle` | 집결지와 비교식 기반 live 상태 대기, 능력 사용 가능·정확한 변신 form·order 종료 확인 |
+| 제어 흐름 | `conditional`, `repeat`, `repeat_until`, `with_timeout` | 조건 분기, cycle/time 상한이 있는 전략 event loop, stalled child action을 끊는 outer deadline |
 | 경제 | `gather`, `return_cargo`, `distribute_workers` | 특정 자원 tag 채취, 화물 반환과 일꾼 재분배 |
-| 생산/건설 | `train`, `produce_until`, `maintain_production`, `build`, `expand`, `build_addon` | 고정 batch, 목표 수까지 blocking 생산, 이후 행동과 병행하는 background 생산, 건물·확장·애드온 건설 |
+| 생산/건설 | `train`, `produce_until`, `maintain_production`, `stop_production`, `build`, `expand`, `build_addon` | 고정 batch, 목표 수까지 blocking 생산, 손실도 다시 보충하는 background 생산, 정책 중단, 건물·확장·애드온 건설 |
 | 테크/유지 | `morph`, `research`, `repair` | 사령부 변환, 업그레이드 연구, 수리 |
 | 정적 능력 | `use_ability` | `ABILITY_SPECS`에 등록된 Terran 능력만 직접 사용 |
 | 능력 래퍼 | `scan`, `call_down_mule`, `supply_drop`, `transform`, `lift`, `land`, `land_on_addon`, `load`, `unload`, `cancel`, `salvage`, `build_nuke`, `launch_nuke`, `replan` | 자주 쓰는 능력, add-on swap, 개별 수송/하차를 typed wrapper로 표현 |
 
-`llm_command_function_schemas()`는 이 41개 함수를 JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
+`llm_command_function_schemas()`는 이 50개 함수를 JSON function declaration으로 반환합니다. `strategy_plan_from_function_calls()`는 일반 함수 호출과 OpenAI 스타일 중첩 함수 호출 payload를 동일한 `StrategyPlan`으로 변환합니다.
 
 ```python
 from starcraft_llm.commands import strategy_plan_from_function_calls
@@ -85,7 +86,7 @@ plan = strategy_plan_from_function_calls(
 | 유닛 대상 | `target_unit`, 관측된 `target_tag`, 또는 semantic selector | `{"type":"attack_target","unit":"viking","target_unit":"nearest_enemy_air"}` |
 | 미네랄 대상 | 미네랄을 찾을 `location` 또는 `x`/`y` anchor | `{"type":"call_down_mule","location":"nearest_mineral"}` |
 
-유닛 대상 selector에는 `nearest_enemy`, `nearest_enemy_structure`, 지상/공중/생체/기계/거대/탐지기 필터, `lowest_health_enemy`, `highest_energy_enemy`, `nearest_friendly`, `lowest_health_friendly`, `highest_energy_friendly`, `damaged_friendly`, `any_friendly`가 포함됩니다. 능력별 `target_filter`가 Snipe/Medivac Heal의 생체 유닛, Interference Matrix의 기계 또는 사이오닉 유닛, MULE 수리의 기계 대상, Supply Drop의 보급고, Bunker/Medivac/Command Center의 적재 가능 유닛을 검증기와 실행기 양쪽에서 제한합니다.
+유닛 대상 selector에는 `nearest_enemy`, `nearest_enemy_structure`, 지상/공중/생체/기계/거대/탐지기/은폐 필터, `lowest_health_enemy`, `highest_energy_enemy`, `nearest_friendly`, `lowest_health_friendly`, `highest_energy_friendly`, `damaged_friendly`, `any_friendly`가 포함됩니다. `attack_target`/`focus_fire`에 `target_alliance="neutral"`과 `nearest_destructible` 또는 관측된 중립 tag를 주면 길을 막는 바위·잔해도 공격하고 파괴 완료까지 동기화할 수 있습니다. 능력별 `target_filter`가 Snipe/Medivac Heal의 생체 유닛, Interference Matrix의 기계 또는 사이오닉 유닛, MULE 수리의 기계 대상, Supply Drop의 보급고, Bunker/Medivac/Command Center의 적재 가능 유닛을 검증기와 실행기 양쪽에서 제한합니다.
 
 Semantic location allowlist는 정확히 다음 20개입니다.
 
@@ -104,9 +105,22 @@ nearest_enemy, nearest_enemy_structure, nearest_mineral
 {"selection": {"mode": "highest_energy", "count": 1, "tags": [12345]}}
 ```
 
-허용 mode는 `all`, `ready`, `idle`, `closest`, `lowest_health`, `highest_energy`입니다. `selection.tags`는 관측 payload의 실제 unit tag로 actor를 정확히 고릅니다. `target_selection`, `producer_selection`, `researcher_selection`도 같은 형식을 사용합니다. `selection.count`와 유닛 생산 count 상한은 200입니다. 전체 plan은 최대 24 actions, 건물·애드온·확장 count는 최대 20, worker 배정·수리 count는 최대 100입니다. 좌표는 0~256 범위, 단순 `wait`는 최대 30초이며 동적 대기·생산 정책은 timeout을 반드시 갖고 최대 1200초로 제한됩니다. 긴 반복은 action 복제 대신 `count`, `produce_until`, `maintain_production`, bounded `wait_until`, `replan` checkpoint로 표현합니다.
+허용 mode는 `all`, `ready`, `idle`, `closest`, `lowest_health`, `highest_energy`입니다. `selection.tags`는 관측 payload의 실제 unit tag로 actor나 적 관측 대상을 정확히 고릅니다. `target_selection`, `producer_selection`, `researcher_selection`도 같은 형식을 사용합니다. `selection.count`와 유닛 생산 count 상한은 200입니다. 전체 plan은 top-level 최대 24 actions, 중첩 정의 최대 96 actions, 제어 흐름 깊이 4, branch body 24 actions, 반복 100 cycles, 조건 group 16 terms, 최악 실행 확장 10,000 dispatches로 제한됩니다. 건물·애드온·확장 count는 최대 20, worker 배정·수리 count는 최대 100입니다. 좌표는 0~256 범위, 단순 `wait`는 최대 30초이며 동적 대기·생산·반복 정책은 timeout을 반드시 갖고 최대 1200초로 제한됩니다.
 
-`wait_until`은 자원/보급/게임 시간뿐 아니라 `army_supply`, 적 유닛·건물 수, idle 생산 건물, 생산 가능 슬롯, 수송 화물, 특정 위치 주변 아군·적, 기지 피격 상태를 관측합니다. 위치 조건에는 `radius`, 모든 동적 조건에는 `timeout_seconds`와 `on_timeout`(`replan` 또는 `fail`)을 지정할 수 있습니다.
+`wait_until`과 제어 흐름 조건은 `gte`, `lte`, `eq`, `neq`, `gt`, `lt` 비교를 지원합니다. `at_least`, `at_most`, `equals` shorthand 또는 `comparison`+`value`를 사용합니다. 관측 범위는 다음과 같습니다.
+
+- 경제/시간: `minerals`, `vespene`, `supply_left`, `supply_used`, `supply_cap`, `army_supply`, `game_time`
+- 아군/테크: `unit_count`, `townhall_count`, `structure_count`, `structure_ready`, `structure_pending`, `upgrade_complete`, `idle_structure_count`, `producer_available`
+- 적/지역: exact cross-race `target`을 지원하는 `enemy_unit_count`, `enemy_structure_count`, `enemy_near_location`, 그리고 `unit_near_location`, `under_attack`, `location_visible`
+- 매치업/이벤트: `enemy_race`(`terran`, `protoss`, `zerg`, `random`, `unknown`)와 `alert_active`(핵 발사 감지, Nydus 감지, 자원 고갈, 공격·생산·연구 완료 등 allowlisted SC2 alert)
+- actor 상태: `idle_unit_count`, `ready_unit_count`, `damaged_unit_count`, `cloaked_unit_count`, `flying_unit_count`, `loaded_unit_count`, `weapon_ready_count`, `cargo_used`, `unit_order_count`
+- 수치/동기화: `unit_health`, `unit_health_fraction`, `unit_energy`, `ability_available`, `unit_form_count`
+
+선택된 actor가 여러 기이면 `unit_health`/`unit_health_fraction`은 최저값, `unit_energy`는 최고값, `unit_order_count`/`cargo_used`는 합계를 반환합니다. 유닛·구조물·townhall·idle producer·적 count/근접·피격 조건에도 `selection.tags`를 적용할 수 있으므로 관측된 특정 tag의 생존·도착·상태를 다시 확인할 수 있습니다. planner의 게임 상태에는 상대 종족, 맵 이름, 현재 SC2 alert와 `is_cloaked`를 포함한 개별 관측값도 전달됩니다.
+
+조건식은 atomic object 하나이거나 `{"match":"all"|"any","conditions":[...]}`입니다. `conditional`은 정확히 한 branch만 실행하고, `repeat`은 고정 횟수, `repeat_until`은 조건 성공 전까지 body를 실행합니다. 모든 branch와 고정 반복의 모든 cycle은 정적 검증되며, branch guard와 정상 종료된 `repeat_until`이 보장하는 자원·건물·유닛·업그레이드 사실도 후속 검증에 반영됩니다. 동적 대기에는 `timeout_seconds`와 `on_timeout`(`replan` 또는 `fail`), 조건 반복에는 `max_cycles`, `max_seconds`, `on_exhausted`를 지정할 수 있습니다. 고정 `repeat`이 `max_seconds` 전에 요청 cycle을 끝내지 못하면 성공으로 가장하지 않고 `on_exhausted`(`replan` 또는 `fail`)로 종료합니다.
+
+`with_timeout`은 nested sequence 전체에 하나의 game-clock deadline을 겁니다. 예를 들어 생산 건물이 파괴되어 `train`이 더는 진행할 수 없거나 target이 사라져 child action이 대기하더라도, deadline 뒤 `replan` 또는 `fail`로 빠져나오므로 뒤의 명령이 영구적으로 가려지지 않습니다.
 
 건설은 기본 `placement_mode="near"` 외에 `placement_mode="exact"`, `max_distance`, `reserve_addon_space`를 지원합니다. own-ramp semantic slot과 함께 쓰면 depot/barracks wall 위치를 정확히 요청할 수 있습니다. `land_on_addon`은 관측된 add-on type/tag의 `add_on_land_position`으로 생산 건물을 내려 add-on swap을 수행합니다.
 
@@ -158,6 +172,49 @@ cancel queue 1; salvage bunker; build nuke; launch nuke enemy main; replan abili
 ## 대표 전략 예시
 
 아래 예시는 모두 `strategy_plan_from_dict()`와 `validate_strategy_plan()`으로 검증되는 shape입니다. 실제 성공 여부는 맵, 상대, 현재 관측, 컨트롤 품질에 따라 달라집니다.
+
+### Adaptive Terran event loop
+
+```json
+{
+  "actions": [
+    {"type": "maintain_production", "unit": "marine", "target_count": 16, "reserve_minerals": 100},
+    {
+      "type": "repeat_until",
+      "until": {"condition": "enemy_structure_count", "at_most": 0},
+      "actions": [
+        {
+          "type": "conditional",
+          "when": {"condition": "supply_left", "at_most": 2},
+          "then_actions": [
+            {"type": "wait_until", "condition": "minerals", "at_least": 100},
+            {"type": "build", "building": "supply_depot"}
+          ],
+          "else_actions": [{"type": "wait", "seconds": 0}]
+        },
+        {
+          "type": "conditional",
+          "when": {
+            "match": "all",
+            "conditions": [
+              {"condition": "under_attack", "location": "own_main", "at_least": 1},
+              {"condition": "unit_count", "target": "marine", "at_least": 6}
+            ]
+          },
+          "then_actions": [{"type": "attack_until_clear", "unit": "marine", "location": "own_main"}],
+          "else_actions": [{"type": "attack_enemy", "unit": "marine"}]
+        }
+      ],
+      "max_cycles": 40,
+      "max_seconds": 900,
+      "on_exhausted": "replan"
+    },
+    {"type": "stop_production", "unit": "marine"}
+  ]
+}
+```
+
+`maintain_production`은 등록 시점에 이미 목표 수가 있어도 정책을 유지하여 이후 손실을 보충합니다. 위 반복이 끝나면 `stop_production`이 정책만 제거하며, 이미 SC2 생산 queue에 들어간 주문은 임의 취소하지 않습니다.
 
 ### Proxy Barracks pressure
 
@@ -222,7 +279,10 @@ cancel queue 1; salvage bunker; build nuke; launch nuke enemy main; replan abili
 - 업그레이드 비용, 연구 건물, 선행 레벨 및 완료 대기 검증
 - gas 채취, expansion, morph, repair, rally 대상 검증
 - blocking/background 생산 정책의 절대 목표 수, 자원·가스·보급 reserve, timeout 검증
-- 도착 확인, 처치 확인, bounded 카이팅, 위치/적/수송/피격 조건의 target shape 검증
+- 도착·처치·지역 소탕 확인, bounded 카이팅, 위치/적/수송/피격 조건의 target shape 검증
+- 비교식, 정확한 enemy type/tag 관측, ability/form/idle 동기화와 form-actor 호환성 검증
+- 조건 branch 양쪽 검증과 guard 사실 추론, 고정 반복 전 cycle 자원 시뮬레이션
+- 중첩 깊이·정의 크기·최악 실행 확장량·cycle/time 상한 검증
 - ability key, actor, target shape, semantic location, selector, queued flag 검증
 - 알 수 없는 명령·유닛·건물·업그레이드·능력 거부
 
@@ -307,7 +367,8 @@ npm run test:all
 - 기존 18개 함수 이름, JSON root shape `{"actions": [...]}`, JSON action array shortcut, OpenAI-style nested function-call adapter는 유지됩니다.
 - `openai` planner와 외부 `server` planner 클라이언트는 아직 연결되지 않았지만, 공통 함수 schema와 adapter는 준비되어 있습니다.
 - 현재 범위는 **Terran standard melee command surface**입니다. 표준 Terran 유닛·건물·업그레이드·능력 표현을 넓힌 것이며, 임의 SC2 API 호출, 비-Terran 종족, 커스텀 모드, 임의 adaptive ladder AI를 의미하지 않습니다.
-- 함수 표면은 bounded 멀티 프레임 생산·이동·전투·조건 관측을 제공하지만, 적 조합에 따른 장기 전략 선택과 완성형 래더 승률은 플래너/정책 품질의 문제이며 보장하지 않습니다.
+- 함수 표면은 bounded 멀티 프레임 생산·이동·전투·조건 분기·반복 관측을 조합할 수 있지만, 적 조합에 따른 장기 전략 선택과 완성형 래더 승률은 플래너/정책 품질의 문제이며 보장하지 않습니다.
+- `conditional`/`repeat_until`은 임의 Python이나 무한 루프가 아니라 검증 가능한 bounded event loop입니다. 20분보다 긴 단일 정책이나 10,000 dispatch를 넘는 최악 실행 트리는 재계획 단위로 나눠야 합니다.
 - wall slot과 exact placement는 지원하지만, 해당 ramp 속성을 제공하지 않는 맵이나 막힌 위치에서는 재시도/재계획하며 모든 맵의 최적 wall을 보장하지 않습니다.
 - SC2가 플레이어 명령으로 노출하지 않는 자동 공격/내부 ability는 함수로 가장하지 않습니다. 다만 BurnySC2가 실제 플레이어 명령으로 노출하는 매설 Widow Mine의 명시적 target fire는 `widow_mine_attack`으로 제공합니다.
 - BurnySC2가 여러 queue-cancel enum을 같은 `CANCEL_LAST` 동작으로 redirect하는 경우에는 관측 order ID로 임의 queue index 하나만 취소한다고 보장하지 않습니다.

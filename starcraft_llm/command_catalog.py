@@ -18,6 +18,82 @@ MAX_SELECTION_COUNT = 200
 MAX_WORKER_ASSIGNMENT_COUNT = 100
 MAX_STRUCTURE_ACTION_COUNT = 20
 MAX_POLICY_SECONDS = 1200
+MAX_CONTROL_DEPTH = 4
+MAX_CONTROL_BRANCH_ACTIONS = 24
+MAX_CONTROL_TOTAL_ACTIONS = 96
+# A nested repeat tree is finite but can still multiply into an impractical
+# number of runtime actions.  Keep the worst-case expansion small enough for a
+# real match while still allowing several hundred-cycle strategy event loops.
+MAX_CONTROL_EXECUTION_ACTIONS = 10_000
+MAX_REPEAT_CYCLES = 100
+MAX_CONDITION_TERMS = 16
+
+ENEMY_RACE_KEYS: NameTuple = ("terran", "protoss", "zerg", "random", "unknown")
+ALERT_KEYS: NameTuple = (
+    "alert_error",
+    "addon_complete",
+    "building_complete",
+    "building_under_attack",
+    "larva_hatched",
+    "merge_complete",
+    "minerals_exhausted",
+    "morph_complete",
+    "mothership_complete",
+    "mule_expired",
+    "nuclear_launch_detected",
+    "nuke_complete",
+    "nydus_worm_detected",
+    "research_complete",
+    "train_error",
+    "train_unit_complete",
+    "train_worker_complete",
+    "transformation_complete",
+    "unit_under_attack",
+    "upgrade_complete",
+    "vespene_exhausted",
+    "warp_in_complete",
+)
+
+CONDITION_KEYS: NameTuple = (
+    "minerals",
+    "vespene",
+    "supply_left",
+    "supply_used",
+    "supply_cap",
+    "structure_count",
+    "structure_ready",
+    "structure_pending",
+    "unit_count",
+    "townhall_count",
+    "upgrade_complete",
+    "game_time",
+    "army_supply",
+    "enemy_unit_count",
+    "enemy_structure_count",
+    "enemy_race",
+    "alert_active",
+    "idle_structure_count",
+    "producer_available",
+    "cargo_used",
+    "unit_near_location",
+    "enemy_near_location",
+    "under_attack",
+    "idle_unit_count",
+    "ready_unit_count",
+    "damaged_unit_count",
+    "cloaked_unit_count",
+    "flying_unit_count",
+    "loaded_unit_count",
+    "weapon_ready_count",
+    "unit_health",
+    "unit_health_fraction",
+    "unit_energy",
+    "unit_order_count",
+    "ability_available",
+    "unit_form_count",
+    "location_visible",
+)
+CONDITION_COMPARISON_KEYS: NameTuple = ("gte", "lte", "eq", "neq", "gt", "lt")
 
 
 @dataclass(frozen=True)
@@ -145,10 +221,10 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
     ),
     CommandVerbSpec(
         key="attack_target",
-        description="Attack a specific visible enemy selected by selector/type or runtime unit tag.",
+        description="Attack a specific visible enemy or neutral destructible selected by selector/type or runtime unit tag.",
         target_registry="TARGET_SELECTORS",
         target_field="target_unit",
-        example='{"type":"attack_target","unit":"marine","target_unit":"nearest_enemy_structure"}',
+        example='{"type":"attack_target","unit":"marine","target_unit":"nearest_destructible","target_alliance":"neutral"}',
     ),
     CommandVerbSpec(
         key="focus_fire",
@@ -156,6 +232,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="TARGET_SELECTORS",
         target_field="target_unit",
         example='{"type":"focus_fire","unit":"marine","target_unit":"lowest_health_enemy"}',
+    ),
+    CommandVerbSpec(
+        key="attack_until_clear",
+        description="Attack-move into an area, engage matching visible enemies, and block until the observed area stays clear or a bounded timeout expires.",
+        target_registry="LOCATION_SPECS",
+        target_field="location",
+        example='{"type":"attack_until_clear","unit":"marine","location":"enemy_natural","radius":18}',
     ),
     CommandVerbSpec(
         key="kite",
@@ -201,10 +284,59 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
     ),
     CommandVerbSpec(
         key="wait_until",
-        description="Pause until an observed resource, supply, tech, or time condition is met.",
+        description="Pause until a comparator-based observed resource, unit, enemy, state, ability, proximity, tech, or time condition is met.",
         target_registry="condition",
         target_field="condition",
         example='{"type":"wait_until","condition":"minerals","at_least":100}',
+    ),
+    CommandVerbSpec(
+        key="wait_for_ability",
+        description="Wait until a bounded number of selected actors can currently issue an allowlisted ability.",
+        target_registry="ABILITY_SPECS",
+        target_field="ability",
+        example='{"type":"wait_for_ability","ability":"scan","actor":"orbital_command"}',
+    ),
+    CommandVerbSpec(
+        key="wait_for_form",
+        description="Wait until selected actors are observed in an exact Terran runtime form.",
+        target_registry="UNIT_FORM_SPECS",
+        target_field="form",
+        example='{"type":"wait_for_form","unit":"siege_tank","form":"siege_tank_sieged"}',
+    ),
+    CommandVerbSpec(
+        key="wait_for_idle",
+        description="Wait until a bounded number of selected Terran actors are idle, allowing order completion to synchronize later actions.",
+        target_registry="UNIT_SPECS",
+        target_field="unit",
+        example='{"type":"wait_for_idle","unit":"ghost","count":1}',
+    ),
+    CommandVerbSpec(
+        key="conditional",
+        description="Evaluate one bounded atomic or all/any condition expression and execute exactly one validated action branch.",
+        target_registry="condition",
+        target_field="when",
+        example='{"type":"conditional","when":{"condition":"enemy_unit_count","target":"mutalisk","at_least":3},"then_actions":[{"type":"train","unit":"viking"}]}',
+    ),
+    CommandVerbSpec(
+        key="repeat",
+        description="Repeat a validated action body for a fixed bounded number of cycles.",
+        target_registry="none",
+        target_field="cycles",
+        example='{"type":"repeat","cycles":3,"actions":[{"type":"scan","location":"enemy_main"},{"type":"wait","seconds":10}]}',
+    ),
+    CommandVerbSpec(
+        key="repeat_until",
+        description="Run a validated action body until a bounded atomic or all/any condition expression succeeds, with cycle/time exhaustion handling.",
+        target_registry="condition",
+        target_field="until",
+        example='{"type":"repeat_until","until":{"condition":"enemy_structure_count","at_most":0},"actions":[{"type":"attack_enemy","unit":"marine"}],"max_cycles":20}',
+    ),
+    CommandVerbSpec(
+        key="with_timeout",
+        description="Run a validated action sequence under one outer game-clock deadline so a stalled child action replans or fails instead of blocking forever.",
+        target_registry="none",
+        target_field="timeout_seconds",
+        example='{"type":"with_timeout","timeout_seconds":90,"actions":[{"type":"train","unit":"marine","count":4}]}',
     ),
     CommandVerbSpec(
         key="gather",
@@ -247,6 +379,13 @@ COMMAND_SURFACE: Tuple[CommandVerbSpec, ...] = (
         target_registry="UNIT_SPECS",
         target_field="unit",
         example='{"type":"maintain_production","unit":"marine","target_count":16,"reserve_minerals":150}',
+    ),
+    CommandVerbSpec(
+        key="stop_production",
+        description="Stop one or all registered background production policies without cancelling already issued in-game queue orders.",
+        target_registry="UNIT_SPECS",
+        target_field="unit",
+        example='{"type":"stop_production","unit":"marine"}',
     ),
     CommandVerbSpec(
         key="build",
@@ -1792,6 +1931,8 @@ TARGET_SELECTORS: NameTuple = (
     "nearest_enemy_mechanical",
     "nearest_enemy_massive",
     "nearest_enemy_detector",
+    "nearest_enemy_cloaked",
+    "nearest_destructible",
     "lowest_health_enemy",
     "highest_energy_enemy",
     "nearest_friendly",
@@ -1848,6 +1989,52 @@ RUNTIME_UNIT_TYPE_TO_ACTOR: Mapping[str, str] = MappingProxyType(
         for enum_name in enum_names
     }
 )
+
+
+def _unit_form_specs() -> Mapping[str, NameTuple]:
+    """Expose exact observable Terran runtime forms to synchronization commands.
+
+    Stable actor keys intentionally collapse forms for ordinary orders.  This
+    registry does the opposite: it gives a plan an explicit, finite vocabulary
+    for confirming that a transform/lift/land order actually completed.
+    """
+
+    forms: dict[str, NameTuple] = {
+        actor: (enum_names[0],)
+        for actor, enum_names in RUNTIME_ACTOR_UNIT_TYPES.items()
+        if enum_names
+    }
+    forms.update(
+        {
+            "siege_tank_mobile": ("SIEGETANK",),
+            "siege_tank_sieged": ("SIEGETANKSIEGED",),
+            "widow_mine_mobile": ("WIDOWMINE",),
+            "widow_mine_burrowed": ("WIDOWMINEBURROWED",),
+            "thor_explosive": ("THOR",),
+            "thor_high_impact": ("THORAP",),
+            "viking_fighter": ("VIKINGFIGHTER",),
+            "viking_assault": ("VIKINGASSAULT",),
+            "liberator_aa": ("LIBERATOR",),
+            "liberator_ag": ("LIBERATORAG",),
+            "supply_depot_raised": ("SUPPLYDEPOT", "SUPPLYDEPOTDROP"),
+            "supply_depot_lowered": ("SUPPLYDEPOTLOWERED",),
+            "command_center_grounded": ("COMMANDCENTER",),
+            "command_center_flying": ("COMMANDCENTERFLYING",),
+            "orbital_command_grounded": ("ORBITALCOMMAND",),
+            "orbital_command_flying": ("ORBITALCOMMANDFLYING",),
+            "barracks_grounded": ("BARRACKS",),
+            "barracks_flying": ("BARRACKSFLYING",),
+            "factory_grounded": ("FACTORY",),
+            "factory_flying": ("FACTORYFLYING",),
+            "starport_grounded": ("STARPORT",),
+            "starport_flying": ("STARPORTFLYING",),
+            "rich_refinery": ("REFINERYRICH",),
+        }
+    )
+    return MappingProxyType(forms)
+
+
+UNIT_FORM_SPECS: Mapping[str, NameTuple] = _unit_form_specs()
 
 
 def canonical_runtime_actor_name(enum_name: str) -> str:
@@ -2033,6 +2220,7 @@ def build_command_prompt_section(categories: Optional[Iterable[str]] = None) -> 
         )
     lines.append("Semantic locations: " + ", ".join(LOCATION_SPECS))
     lines.append("Unit target selectors: " + ", ".join(TARGET_SELECTORS))
+    lines.append("Exact observable Terran runtime forms: " + ", ".join(UNIT_FORM_SPECS))
     lines.append(
         "Selection modes: "
         + ", ".join(SELECTION_SPECS)
@@ -2097,6 +2285,7 @@ def resolve_selection_mode(name: str) -> SelectionSpec:
 
 
 __all__ = (
+    "ALERT_KEYS",
     "ABILITY_ALIAS_INDEX",
     "ABILITY_SPECS",
     "ADDON_SPECS",
@@ -2109,16 +2298,25 @@ __all__ = (
     "BIOLOGICAL_UNIT_KEYS",
     "BUNKER_LOADABLE_UNIT_KEYS",
     "COMMAND_SURFACE",
+    "CONDITION_COMPARISON_KEYS",
+    "CONDITION_KEYS",
     "CONTROLLABLE_UNIT_SPECS",
     "CommandVerbSpec",
     "EntitySpec",
+    "ENEMY_RACE_KEYS",
     "FLYING_STRUCTURE_ACTOR_KEYS",
     "LOCATION_SPECS",
     "LIFTABLE_STRUCTURE_KEYS",
     "LocationSpec",
     "MAX_PLAN_ACTIONS",
+    "MAX_CONDITION_TERMS",
+    "MAX_CONTROL_BRANCH_ACTIONS",
+    "MAX_CONTROL_DEPTH",
+    "MAX_CONTROL_EXECUTION_ACTIONS",
+    "MAX_CONTROL_TOTAL_ACTIONS",
     "MAX_POLICY_SECONDS",
     "MAX_REPLAN_CYCLES",
+    "MAX_REPEAT_CYCLES",
     "MAX_SELECTION_COUNT",
     "MAX_STRUCTURE_ACTION_COUNT",
     "MAX_WORKER_ASSIGNMENT_COUNT",
@@ -2141,6 +2339,7 @@ __all__ = (
     "TRANSFORM_ABILITY_KEYS",
     "TRANSPORT_ACTOR_KEYS",
     "UNIT_SPECS",
+    "UNIT_FORM_SPECS",
     "UPGRADE_SPECS",
     "all_specs",
     "build_command_prompt_section",

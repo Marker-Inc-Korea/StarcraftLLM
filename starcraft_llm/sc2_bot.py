@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import contextlib
 import io
+import math
 import os
 import platform
 import re
@@ -15,6 +16,7 @@ from typing import Any, Iterable
 from starcraft_llm.command_catalog import (
     ABILITY_SPECS,
     ADDON_SPECS,
+    ALERT_KEYS,
     BIOLOGICAL_UNIT_KEYS,
     BUNKER_LOADABLE_UNIT_KEYS,
     FLYING_STRUCTURE_ACTOR_KEYS,
@@ -29,6 +31,7 @@ from starcraft_llm.command_catalog import (
     RUNTIME_ACTOR_UNIT_TYPES,
     STRUCTURE_SPECS,
     TARGET_SELECTORS,
+    UNIT_FORM_SPECS,
     UNIT_SPECS,
     UPGRADE_SPECS,
     AbilitySpec,
@@ -53,9 +56,14 @@ from starcraft_llm.planner import (
 from starcraft_llm.strategy import (
     AttackEnemyCommand,
     AttackMoveCommand,
+    AttackUntilClearCommand,
     BuildAddonCommand,
     BuildStructureCommand,
     DistributeWorkersCommand,
+    ConditionExpression,
+    ConditionGroup,
+    ConditionSpec,
+    ConditionalCommand,
     ExpandCommand,
     GatherGasCommand,
     GatherMineralsCommand,
@@ -65,15 +73,18 @@ from starcraft_llm.strategy import (
     MoveCommand,
     PatrolCommand,
     ProductionPolicyCommand,
+    RepeatCommand,
     RallyCommand,
     RepairCommand,
     ResearchUpgradeCommand,
     ReturnCargoCommand,
     StopCommand,
+    StopProductionCommand,
     StrategyPlan,
     TrainUnitCommand,
     WaitCommand,
     WaitUntilCommand,
+    WithTimeoutCommand,
     strategy_plan_to_json,
 )
 from starcraft_llm.validator import PlanValidationError, validate_strategy_plan
@@ -143,7 +154,7 @@ class MoveUnitBot:  # Runtime base class is injected after sc2 import.
 
 
 def create_game_state_bot_class(bot_ai_base):
-    class _GameStateBot(bot_ai_base):
+    class _GameStateBot(bot_ai_base):  # type: ignore[misc, valid-type]
         def __init__(self):
             super().__init__()
             self.summary: GameStateSummary | None = None
@@ -188,6 +199,11 @@ def summarize_bot_state(bot) -> GameStateSummary:
         for unit in _iter_observable_resource_units(bot)
     )
     semantic_locations = _semantic_location_snapshots(bot)
+    enemy_race = _enemy_race_name(getattr(bot, "enemy_race", None))
+    game_info = getattr(bot, "game_info", None)
+    raw_map_name = getattr(game_info, "map_name", None)
+    map_name = str(raw_map_name) if raw_map_name else None
+    active_alerts = _active_alert_names(bot)
 
     upgrades = []
     state = getattr(bot, "state", None)
@@ -219,6 +235,9 @@ def summarize_bot_state(bot) -> GameStateSummary:
             unit_observations + enemy_observations + resource_observations
         ),
         semantic_locations=semantic_locations,
+        enemy_race=enemy_race,
+        map_name=map_name,
+        active_alerts=active_alerts,
     )
 
 
@@ -256,6 +275,8 @@ def _iter_observable_resource_units(bot):
     for collection in (
         getattr(bot, "mineral_field", ()),
         getattr(bot, "vespene_geyser", ()),
+        getattr(bot, "destructables", ()),
+        getattr(bot, "watchtowers", ()),
     ):
         for unit in collection:
             tag = getattr(unit, "tag", id(unit))
@@ -285,6 +306,7 @@ def _unit_observation(unit, alliance: str) -> UnitObservationSnapshot:
         energy=_optional_float(getattr(unit, "energy", None)),
         is_ready=getattr(unit, "is_ready", None),
         is_flying=getattr(unit, "is_flying", None),
+        is_cloaked=getattr(unit, "is_cloaked", None),
         is_burrowed=getattr(unit, "is_burrowed", None),
         is_loaded=getattr(unit, "is_loaded", None),
         is_idle=getattr(unit, "is_idle", None),
@@ -517,6 +539,31 @@ def _unit_type_name(unit) -> str:
     return "worker" if canonical == "scv" else canonical
 
 
+def _enemy_race_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    raw_name = normalize_name(str(getattr(value, "name", value)))
+    if raw_name in {"terran", "protoss", "zerg", "random"}:
+        return raw_name
+    return "unknown"
+
+
+def _active_alert_names(bot: Any) -> tuple[str, ...]:
+    canonical_by_normalized = {
+        normalize_name(alert).replace("_", ""): alert for alert in ALERT_KEYS
+    }
+    alerts = getattr(getattr(bot, "state", None), "alerts", ()) or ()
+    result = set()
+    for alert in alerts:
+        raw_name = normalize_name(str(getattr(alert, "name", alert))).replace(
+            "_", ""
+        )
+        canonical = canonical_by_normalized.get(raw_name)
+        if canonical is not None:
+            result.add(canonical)
+    return tuple(sorted(result))
+
+
 def _structure_is_ready(structure) -> bool:
     is_ready = getattr(structure, "is_ready", None)
     if is_ready is not None:
@@ -528,7 +575,7 @@ def _structure_is_ready(structure) -> bool:
 
 
 def create_move_unit_bot_class(bot_ai_base, point2_class):
-    class _MoveUnitBot(bot_ai_base):
+    class _MoveUnitBot(bot_ai_base):  # type: ignore[misc, valid-type]
         def __init__(
             self,
             plan: StrategyPlan | None = None,
@@ -555,6 +602,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             self._plan_finished_at_loop_time: float | None = None
             self._left_game = False
             self._production_policies: list[dict[str, Any]] = []
+            self._control_flow_states: dict[int, dict[str, Any]] = {}
+            self._timeout_scope_states: dict[int, dict[str, Any]] = {}
             self._observed_health_by_tag: dict[str, float] = {}
 
         async def on_start(self):
@@ -636,11 +685,22 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
 
             action = self.plan.actions[self._current_action_index]
+            completed_scope = (
+                id(action)
+                if isinstance(action, WithTimeoutCommand)
+                and id(action) in self._timeout_scope_states
+                else None
+            )
+            if await self._expire_timeout_scope(skip_scope=completed_scope):
+                return
             if isinstance(action, MoveCommand):
                 await self._execute_move(action, iteration)
                 return
             if isinstance(action, AttackMoveCommand):
                 await self._execute_attack(action, iteration)
+                return
+            if isinstance(action, AttackUntilClearCommand):
+                await self._execute_attack_until_clear(action, iteration)
                 return
             if isinstance(action, AttackEnemyCommand):
                 await self._execute_attack_enemy(action, iteration)
@@ -666,6 +726,15 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, WaitUntilCommand):
                 await self._execute_wait_until(action, iteration)
                 return
+            if isinstance(action, ConditionalCommand):
+                await self._execute_conditional(action)
+                return
+            if isinstance(action, RepeatCommand):
+                await self._execute_repeat(action)
+                return
+            if isinstance(action, WithTimeoutCommand):
+                self._execute_with_timeout(action)
+                return
             if isinstance(action, GatherMineralsCommand):
                 await self._execute_gather_minerals(action, iteration)
                 return
@@ -683,6 +752,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return
             if isinstance(action, ProductionPolicyCommand):
                 self._execute_production_policy(action)
+                return
+            if isinstance(action, StopProductionCommand):
+                self._execute_stop_production(action)
                 return
             if isinstance(action, BuildStructureCommand):
                 await self._execute_build(action, iteration)
@@ -885,6 +957,106 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     f"Waiting for controllable {command.unit} units before attacking..."
                 )
 
+        async def _execute_attack_until_clear(
+            self, command: AttackUntilClearCommand, iteration: int
+        ) -> None:
+            anchor = await self._resolve_location(command)
+            if anchor is None:
+                await self._retry_or_replan(
+                    command, iteration, "attack-until-clear location is unavailable"
+                )
+                return
+
+            actor_tags = set(self._action_context.get("clear_actor_tags", ()))
+            if actor_tags:
+                actors = [
+                    unit
+                    for unit in self._select_exact_units(command.unit)
+                    if str(getattr(unit, "tag", "")) in actor_tags
+                ]
+            else:
+                actors = list(self._select_units(command.unit, command, anchor))
+            if not actors:
+                await self._retry_or_replan(
+                    command,
+                    iteration,
+                    f"attack-until-clear actors {command.unit} are unavailable",
+                )
+                return
+
+            now = self._game_time_now()
+            if "clear_started_at" not in self._action_context:
+                self._action_context = {
+                    "clear_started_at": now,
+                    "clear_actor_tags": tuple(
+                        str(getattr(actor, "tag", ""))
+                        for actor in actors
+                        if getattr(actor, "tag", None) is not None
+                    ),
+                    "clear_last_issue_iteration": -1000,
+                }
+
+            selector = normalize_name(command.target_unit or "nearest_enemy")
+            radius_squared = command.radius**2
+            nearby_enemies = [
+                enemy
+                for enemy in self._enemy_target_candidates(selector, "")
+                if self._distance_squared(enemy, anchor) <= radius_squared
+            ]
+            last_issue = int(
+                self._action_context.get("clear_last_issue_iteration", -1000)
+            )
+            if nearby_enemies:
+                self._action_context.pop("clear_confirmed_at", None)
+                reference = self._first_unit(actors)
+                nearby_enemies.sort(
+                    key=lambda enemy: self._distance_squared(enemy, reference)
+                )
+                if iteration - last_issue >= 4:
+                    for actor in actors:
+                        self._issue_order(actor, "attack", nearby_enemies[0], False)
+                    self._action_context["clear_last_issue_iteration"] = iteration
+            elif iteration - last_issue >= 8:
+                for actor in actors:
+                    self._issue_order(actor, "attack", anchor, False)
+                self._action_context["clear_last_issue_iteration"] = iteration
+
+            confirmed_area = self._location_is_visible(anchor) or any(
+                self._distance_squared(actor, anchor)
+                <= command.arrival_tolerance**2
+                for actor in actors
+            )
+            if not nearby_enemies and confirmed_area:
+                clear_since = self._action_context.get("clear_confirmed_at")
+                if clear_since is None:
+                    self._action_context["clear_confirmed_at"] = now
+                elif now - float(clear_since) >= command.clear_seconds:
+                    print(
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"area clear for {command.clear_seconds:g}s"
+                    )
+                    self._advance_action()
+                    return
+
+            elapsed = now - float(self._action_context["clear_started_at"])
+            if elapsed >= command.timeout_seconds:
+                reason = (
+                    "attack-until-clear timed out after "
+                    f"{command.timeout_seconds:g}s"
+                )
+                if command.on_timeout == "replan":
+                    await self._replan_or_leave(reason)
+                else:
+                    print(f"Runtime action failed terminally: {reason}", file=sys.stderr)
+                    self._left_game = True
+                    await self.client.leave()
+                return
+            if iteration % 22 == 0:
+                print(
+                    f"Clearing area with {len(actors)} {command.unit} unit(s); "
+                    f"nearby enemies={len(nearby_enemies)}"
+                )
+
         async def _execute_attack_enemy(
             self, command: AttackEnemyCommand, iteration: int
         ) -> None:
@@ -892,14 +1064,12 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 "focus_issued"
             ):
                 target_tag = str(self._action_context.get("focus_target_tag", ""))
-                enemies = list(getattr(self, "enemy_units", [])) + list(
-                    getattr(self, "enemy_structures", [])
-                )
+                target_candidates = self._attack_target_candidates(command)
                 target = next(
                     (
-                        enemy
-                        for enemy in enemies
-                        if str(getattr(enemy, "tag", id(enemy))) == target_tag
+                        candidate
+                        for candidate in target_candidates
+                        if str(getattr(candidate, "tag", id(candidate))) == target_tag
                     ),
                     None,
                 )
@@ -952,7 +1122,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
                     f"issued attack command to {len(units)} {command.unit} unit(s) "
-                    f"against visible target {getattr(command, 'target_unit', None) or getattr(command, 'target_tag', None) or 'nearest_enemy'}"
+                    f"against visible {command.target_alliance} target "
+                    f"{getattr(command, 'target_unit', None) or getattr(command, 'target_tag', None) or 'nearest_enemy'}"
                 )
                 if command.wait_for_target_death:
                     self._action_context = {
@@ -970,36 +1141,62 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     self._advance_action()
             elif iteration % 22 == 0:
                 print(
-                    f"Waiting for controllable {command.unit} units and the requested visible enemy before attacking..."
+                    f"Waiting for controllable {command.unit} units and the requested visible "
+                    f"{command.target_alliance} target before attacking..."
                 )
+
+        def _attack_target_candidates(self, command: AttackEnemyCommand) -> list[Any]:
+            if command.target_alliance == "neutral":
+                return list(getattr(self, "destructables", []))
+            return list(getattr(self, "enemy_units", [])) + list(
+                getattr(self, "enemy_structures", [])
+            )
 
         def _resolve_attack_target(
             self, command: AttackEnemyCommand | KiteCommand, units
         ):
-            enemies = list(getattr(self, "enemy_units", [])) + list(
-                getattr(self, "enemy_structures", [])
+            alliance = getattr(command, "target_alliance", "enemy")
+            candidates = (
+                self._attack_target_candidates(command)
+                if isinstance(command, AttackEnemyCommand)
+                else list(getattr(self, "enemy_units", []))
+                + list(getattr(self, "enemy_structures", []))
             )
             target_tag = getattr(command, "target_tag", None)
             if target_tag is not None:
                 expected = str(target_tag)
                 candidate = next(
                     (
-                        enemy
-                        for enemy in enemies
-                        if str(getattr(enemy, "tag", "")) == expected
+                        target
+                        for target in candidates
+                        if str(getattr(target, "tag", "")) == expected
                     ),
                     None,
                 )
                 return (
                     candidate
                     if candidate is not None
-                    and self._matches_named_target(candidate, command, "enemy")
+                    and self._matches_named_target(candidate, command, alliance)
                     else None
                 )
             selector = normalize_name(
-                str(getattr(command, "target_unit", None) or "nearest_enemy")
+                str(
+                    getattr(command, "target_unit", None)
+                    or (
+                        "nearest_destructible"
+                        if alliance == "neutral"
+                        else "nearest_enemy"
+                    )
+                )
             )
-            candidates = self._enemy_target_candidates(selector, "")
+            if alliance == "neutral":
+                candidates = [
+                    target
+                    for target in candidates
+                    if self._matches_named_target(target, command, "neutral")
+                ]
+            else:
+                candidates = self._enemy_target_candidates(selector, "")
             if not candidates:
                 return None
             if units and selector not in {
@@ -1217,10 +1414,13 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             self, command: WaitUntilCommand, iteration: int
         ) -> None:
             current = await self._wait_until_observed_value(command)
-            if current >= command.at_least:
+            current_text = "unavailable" if current is None else f"{current:g}"
+            if current is not None and self._condition_comparison_met(
+                current, command.comparison, command.at_least
+            ):
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
-                    f"condition met: {self._describe_action(command)} (current={current:g})"
+                    f"condition met: {self._describe_action(command)} (current={current_text})"
                 )
                 self._advance_action()
                 return
@@ -1229,7 +1429,7 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._action_started_at_loop_time = self._game_time_now()
                 print(
                     f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
-                    f"waiting until {self._describe_action(command)} (current={current:g})"
+                    f"waiting until {self._describe_action(command)} (current={current_text})"
                 )
                 return
 
@@ -1251,8 +1451,163 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if iteration % 22 == 0:
                 print(
                     f"Still waiting for {self._describe_action(command)} "
-                    f"(current={current:g}, elapsed={elapsed:g}/{command.timeout_seconds:g}s)"
+                    f"(current={current_text}, elapsed={elapsed:g}/{command.timeout_seconds:g}s)"
                 )
+
+        async def _execute_conditional(self, command: ConditionalCommand) -> None:
+            matched = await self._condition_expression_met(command.when)
+            replacement = command.then_actions if matched else command.else_actions
+            branch_name = "then" if matched else "else"
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"conditional selected {branch_name} branch ({len(replacement)} action(s))"
+            )
+            self._replace_current_action(replacement)
+
+        async def _execute_repeat(self, command: RepeatCommand) -> None:
+            state_key = id(command)
+            loop_state = self._control_flow_states.setdefault(
+                state_key,
+                {"started_at": self._game_time_now(), "cycles": 0},
+            )
+            cycles = int(loop_state["cycles"])
+
+            if command.until is not None and await self._condition_expression_met(
+                command.until
+            ):
+                self._control_flow_states.pop(state_key, None)
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    f"repeat-until condition met after {cycles} cycle(s)"
+                )
+                self._replace_current_action(())
+                return
+
+            elapsed = self._game_time_now() - float(loop_state["started_at"])
+            cycle_limit_reached = cycles >= command.max_cycles
+            time_limit_reached = elapsed >= command.max_seconds
+            if cycle_limit_reached or time_limit_reached:
+                self._control_flow_states.pop(state_key, None)
+                if command.until is None and cycle_limit_reached:
+                    print(
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"repeat completed after {cycles} cycle(s)"
+                    )
+                    self._replace_current_action(())
+                    return
+                if command.until is not None and command.on_exhausted == "continue":
+                    print(
+                        f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                        f"repeat-until continued after {cycles} cycle(s)"
+                    )
+                    self._replace_current_action(())
+                    return
+                reason = (
+                    f"{'repeat-until exhausted' if command.until is not None else 'fixed repeat timed out'} after "
+                    f"{cycles} cycle(s)/{elapsed:g}s"
+                )
+                if command.on_exhausted == "replan":
+                    await self._replan_or_leave(reason)
+                else:
+                    print(f"Runtime action failed terminally: {reason}", file=sys.stderr)
+                    self._left_game = True
+                    await self.client.leave()
+                return
+
+            loop_state["cycles"] = cycles + 1
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"starting repeat cycle {cycles + 1}/{command.max_cycles}"
+            )
+            self._replace_current_action((*command.actions, command))
+
+        def _execute_with_timeout(self, command: WithTimeoutCommand) -> None:
+            state_key = id(command)
+            if state_key in self._timeout_scope_states:
+                self._timeout_scope_states.pop(state_key, None)
+                print(
+                    f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                    "with-timeout sequence completed"
+                )
+                self._replace_current_action(())
+                return
+
+            self._timeout_scope_states[state_key] = {
+                "started_at": self._game_time_now(),
+                "command": command,
+            }
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"starting with-timeout sequence ({command.timeout_seconds:g}s)"
+            )
+            self._replace_current_action((*command.actions, command))
+
+        async def _expire_timeout_scope(self, skip_scope: int | None = None) -> bool:
+            now = self._game_time_now()
+            expired: list[tuple[float, int, WithTimeoutCommand]] = []
+            for state_key, scope in self._timeout_scope_states.items():
+                if state_key == skip_scope:
+                    continue
+                command = scope.get("command")
+                if not isinstance(command, WithTimeoutCommand):
+                    continue
+                started_at = float(scope.get("started_at", now))
+                deadline = started_at + command.timeout_seconds
+                if now >= deadline:
+                    expired.append((deadline, state_key, command))
+            if not expired:
+                return False
+
+            _, state_key, command = min(expired, key=lambda item: item[0])
+            self._timeout_scope_states.pop(state_key, None)
+            reason = (
+                "with-timeout sequence exceeded "
+                f"{command.timeout_seconds:g}s before all child actions completed"
+            )
+            if command.on_timeout == "replan":
+                await self._replan_or_leave(reason)
+            else:
+                print(f"Runtime action failed terminally: {reason}", file=sys.stderr)
+                self._left_game = True
+                await self.client.leave()
+            return True
+
+        async def _condition_expression_met(
+            self, expression: ConditionExpression
+        ) -> bool:
+            if isinstance(expression, ConditionGroup):
+                results = [
+                    await self._atomic_condition_met(condition)
+                    for condition in expression.conditions
+                ]
+                return all(results) if expression.match == "all" else any(results)
+            return await self._atomic_condition_met(expression)
+
+        async def _atomic_condition_met(self, condition: ConditionSpec) -> bool:
+            current = await self._wait_until_observed_value(condition)
+            return current is not None and self._condition_comparison_met(
+                current, condition.comparison, condition.value
+            )
+
+        @staticmethod
+        def _condition_comparison_met(
+            current: float, comparison: str, expected: float
+        ) -> bool:
+            if comparison == "gte":
+                return current >= expected
+            if comparison == "lte":
+                return current <= expected
+            if comparison == "eq":
+                return math.isclose(current, expected, rel_tol=1e-9, abs_tol=1e-9)
+            if comparison == "neq":
+                return not math.isclose(
+                    current, expected, rel_tol=1e-9, abs_tol=1e-9
+                )
+            if comparison == "gt":
+                return current > expected
+            if comparison == "lt":
+                return current < expected
+            raise TypeError(f"unsupported condition comparison: {comparison}")
 
         async def _execute_gather_minerals(
             self, command: GatherMineralsCommand, iteration: int
@@ -1415,7 +1770,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 ),
                 None,
             )
-            if self._owned_unit_count(command.unit) >= command.target_count:
+            if (
+                not command.background
+                and self._owned_unit_count(command.unit) >= command.target_count
+            ):
                 if (
                     policy is not None
                     and policy["command"].target_count <= command.target_count
@@ -1445,6 +1803,23 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if command.background:
                 self._advance_action()
                 return
+
+        def _execute_stop_production(self, command: StopProductionCommand) -> None:
+            before = len(self._production_policies)
+            if command.unit is None:
+                self._production_policies.clear()
+            else:
+                self._production_policies = [
+                    policy
+                    for policy in self._production_policies
+                    if policy.get("unit") != command.unit
+                ]
+            stopped = before - len(self._production_policies)
+            print(
+                f"Action {self._current_action_index + 1}/{self._plan_action_count()}: "
+                f"stopped {stopped} production policy/policies"
+            )
+            self._advance_action()
 
         async def _run_production_policies(self, iteration: int) -> bool:
             del iteration
@@ -2048,8 +2423,15 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 if _structure_is_ready(refinery)
             ]
 
-        def _structure_count(self, building: str, readiness: str = "total") -> int:
-            structures = self._select_exact_units(building)
+        def _structure_count(
+            self,
+            building: str,
+            readiness: str = "total",
+            command: Any | None = None,
+        ) -> int:
+            structures = list(self._select_exact_units(building))
+            if command is not None:
+                structures = list(self._apply_selection_spec(structures, command))
             if readiness == "total":
                 return len(structures)
             if readiness == "ready":
@@ -2062,7 +2444,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
             raise ValueError(f"unsupported structure readiness filter: {readiness}")
 
-        async def _wait_until_observed_value(self, command: WaitUntilCommand) -> float:
+        async def _wait_until_observed_value(
+            self, command: WaitUntilCommand | ConditionSpec
+        ) -> float | None:
             if command.condition == "minerals":
                 return float(self.minerals)
             if command.condition == "vespene":
@@ -2074,7 +2458,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if command.condition == "supply_cap":
                 return float(self.supply_cap)
             if command.condition == "townhall_count":
-                return float(len(self.townhalls))
+                return float(
+                    len(self._apply_selection_spec(self.townhalls, command))
+                )
             if command.condition == "game_time":
                 return float(getattr(self, "time", 0.0))
             if command.condition == "army_supply":
@@ -2089,19 +2475,176 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                         total += float(spec.supply or 0)
                 return total
             if command.condition == "enemy_unit_count":
-                return float(len(getattr(self, "enemy_units", [])))
+                candidates = list(getattr(self, "enemy_units", []))
+                if command.target is not None:
+                    candidates = [
+                        unit
+                        for unit in candidates
+                        if self._matches_named_target(unit, command, "enemy")
+                    ]
+                if command.selection is not None:
+                    candidates = list(
+                        self._apply_selection_spec(candidates, command)
+                    )
+                return float(len(candidates))
             if command.condition == "enemy_structure_count":
-                return float(len(getattr(self, "enemy_structures", [])))
+                candidates = list(getattr(self, "enemy_structures", []))
+                if command.target is not None:
+                    candidates = [
+                        unit
+                        for unit in candidates
+                        if self._matches_named_target(unit, command, "enemy")
+                    ]
+                if command.selection is not None:
+                    candidates = list(
+                        self._apply_selection_spec(candidates, command)
+                    )
+                return float(len(candidates))
+            if command.condition == "enemy_race":
+                current_race = (
+                    _enemy_race_name(getattr(self, "enemy_race", None))
+                    or "unknown"
+                )
+                return 1.0 if current_race == command.target else 0.0
+            if command.condition == "alert_active":
+                return 1.0 if command.target in _active_alert_names(self) else 0.0
+            if command.condition == "location_visible":
+                anchor = await self._resolve_location(command)
+                return 1.0 if anchor is not None and self._location_is_visible(anchor) else 0.0
             if command.condition == "idle_structure_count":
-                return float(len(self._ready_idle_structures(command.target or "")))
+                structures = self._ready_idle_structures(command.target or "")
+                return float(len(self._apply_selection_spec(structures, command)))
             if command.condition == "producer_available":
-                return float(len(self._available_producers(command.target or "")))
+                producers = self._available_producers(command.target or "")
+                return float(len(self._apply_selection_spec(producers, command)))
+            if command.condition == "ability_available":
+                ability_key = command.ability or ""
+                ability_spec = _RUNTIME_ABILITY_SPECS.get(ability_key)
+                if ability_spec is None:
+                    return 0.0
+                actor = command.actor or (
+                    ability_spec.actors[0] if ability_spec.actors else "any"
+                )
+                if actor == "any":
+                    sources = []
+                    for compatible_actor in ability_spec.actors:
+                        sources.extend(self._select_exact_units(compatible_actor))
+                    sources = list(
+                        {
+                            str(getattr(source, "tag", id(source))): source
+                            for source in sources
+                        }.values()
+                    )
+                    sources = self._apply_selection_spec(sources, command)
+                else:
+                    sources = self._apply_selection_spec(
+                        self._select_exact_units(actor), command
+                    )
+                ability_id = self._ability_id_for_enum(ability_spec.enum_name)
+                available = 0
+                for source in sources:
+                    if await self._unit_has_available_ability(source, ability_id):
+                        available += 1
+                return float(available)
+            if command.condition == "unit_form_count":
+                enum_names = UNIT_FORM_SPECS.get(command.target or "", ())
+                raw_forms = {normalize_name(enum_name) for enum_name in enum_names}
+                candidates = self._select_exact_units(command.actor or "any")
+                candidates = self._apply_selection_spec(candidates, command)
+                return float(
+                    sum(
+                        1
+                        for unit in candidates
+                        if self._raw_unit_type_name(unit) in raw_forms
+                    )
+                )
             if command.condition == "cargo_used":
                 transports = self._apply_selection_spec(
                     self._select_exact_units(command.target or ""), command
                 )
                 return float(
                     sum(int(getattr(unit, "cargo_used", 0) or 0) for unit in transports)
+                )
+            if command.condition in {
+                "idle_unit_count",
+                "ready_unit_count",
+                "damaged_unit_count",
+                "cloaked_unit_count",
+                "flying_unit_count",
+                "loaded_unit_count",
+                "weapon_ready_count",
+                "unit_health",
+                "unit_health_fraction",
+                "unit_energy",
+                "unit_order_count",
+            }:
+                candidates = list(self._select_exact_units(command.target or ""))
+                candidates = list(self._apply_selection_spec(candidates, command))
+                if command.condition == "idle_unit_count":
+                    return float(
+                        sum(
+                            1
+                            for unit in candidates
+                            if bool(
+                                getattr(
+                                    unit,
+                                    "is_idle",
+                                    not bool(getattr(unit, "orders", ())),
+                                )
+                            )
+                        )
+                    )
+                if command.condition == "ready_unit_count":
+                    return float(
+                        sum(1 for unit in candidates if getattr(unit, "is_ready", True))
+                    )
+                if command.condition == "damaged_unit_count":
+                    return float(sum(1 for unit in candidates if self._is_damaged(unit)))
+                if command.condition == "cloaked_unit_count":
+                    return float(
+                        sum(
+                            1
+                            for unit in candidates
+                            if bool(
+                                getattr(unit, "is_cloaked", False)
+                                or getattr(unit, "is_burrowed", False)
+                            )
+                        )
+                    )
+                if command.condition == "flying_unit_count":
+                    return float(sum(1 for unit in candidates if self._is_flying(unit)))
+                if command.condition == "loaded_unit_count":
+                    return float(
+                        sum(
+                            1
+                            for unit in candidates
+                            if bool(getattr(unit, "is_loaded", False))
+                        )
+                    )
+                if command.condition == "weapon_ready_count":
+                    return float(
+                        sum(
+                            1
+                            for unit in candidates
+                            if float(getattr(unit, "weapon_cooldown", 0.0) or 0.0)
+                            <= 0
+                        )
+                    )
+                if command.condition == "unit_order_count":
+                    if not candidates:
+                        return None
+                    return float(
+                        sum(len(getattr(unit, "orders", ()) or ()) for unit in candidates)
+                    )
+                if not candidates:
+                    return None
+                if command.condition == "unit_energy":
+                    return max(float(getattr(unit, "energy", 0.0) or 0.0) for unit in candidates)
+                if command.condition == "unit_health_fraction":
+                    return min(self._health_ratio(unit) for unit in candidates)
+                return min(
+                    float(getattr(unit, "health", 0.0) or 0.0)
+                    for unit in candidates
                 )
             if command.condition in {
                 "unit_near_location",
@@ -2119,6 +2662,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 else:
                     selector = normalize_name(str(command.target or "nearest_enemy"))
                     candidates = self._enemy_target_candidates(selector, "")
+                    if command.selection is not None:
+                        candidates = list(
+                            self._apply_selection_spec(candidates, command, anchor)
+                        )
                 radius_squared = command.radius**2
                 return float(
                     sum(
@@ -2131,11 +2678,16 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 anchor = await self._resolve_location(command)
                 if anchor is None:
                     return 0.0
-                return self._under_attack_observed_value(anchor, command.radius)
+                return self._under_attack_observed_value(
+                    anchor, command.radius, command
+                )
             if command.condition == "unit_count":
-                if command.target == "worker":
-                    return float(len(self.workers))
-                return float(len(self._select_exact_units(command.target or "")))
+                candidates = (
+                    self.workers
+                    if command.target == "worker"
+                    else self._select_exact_units(command.target or "")
+                )
+                return float(len(self._apply_selection_spec(candidates, command)))
             if command.condition == "upgrade_complete":
                 upgrade = command.target or ""
                 upgrade_type = self._upgrade_id(upgrade)
@@ -2145,19 +2697,27 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return 1.0 if upgrade_type in completed else 0.0
             if command.condition == "structure_count":
                 return float(
-                    self._structure_count(command.target or "", readiness="total")
+                    self._structure_count(
+                        command.target or "", readiness="total", command=command
+                    )
                 )
             if command.condition == "structure_ready":
                 return float(
-                    self._structure_count(command.target or "", readiness="ready")
+                    self._structure_count(
+                        command.target or "", readiness="ready", command=command
+                    )
                 )
             if command.condition == "structure_pending":
                 return float(
-                    self._structure_count(command.target or "", readiness="pending")
+                    self._structure_count(
+                        command.target or "", readiness="pending", command=command
+                    )
                 )
             raise TypeError(f"unsupported wait-until condition: {command.condition}")
 
-        def _under_attack_observed_value(self, anchor, radius: float) -> float:
+        def _under_attack_observed_value(
+            self, anchor, radius: float, command: Any | None = None
+        ) -> float:
             radius_squared = radius**2
             friendly = [
                 unit
@@ -2173,6 +2733,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 )
                 if self._distance_squared(unit, anchor) <= radius_squared
             ]
+            if command is not None:
+                friendly = list(
+                    self._apply_selection_spec(friendly, command, anchor)
+                )
             if not friendly:
                 return 0.0
 
@@ -2284,6 +2848,26 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 if not self._has_unsatisfied_production_policies():
                     self._mark_plan_finished()
 
+        def _replace_current_action(
+            self, replacement: Iterable[Any]
+        ) -> None:
+            if self.plan is None:
+                raise RuntimeError("strategy plan is not loaded")
+            values = tuple(replacement)
+            actions = self.plan.actions
+            self.plan = StrategyPlan(
+                actions=(
+                    actions[: self._current_action_index]
+                    + values
+                    + actions[self._current_action_index + 1 :]
+                )
+            )
+            self._action_started_at_loop_time = None
+            self._action_context = {}
+            if self._current_action_index >= self._plan_action_count():
+                if not self._has_unsatisfied_production_policies():
+                    self._mark_plan_finished()
+
         def _mark_plan_finished(self) -> None:
             if self._plan_finished_at_loop_time is None:
                 self._plan_finished_at_loop_time = asyncio.get_running_loop().time()
@@ -2297,7 +2881,17 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 command, (MoveCommand, PatrolCommand, HoldPositionCommand, StopCommand)
             ):
                 units = [candidate for candidate in units if self._is_flying(candidate)]
-            if isinstance(command, (MoveCommand, PatrolCommand, HoldPositionCommand)):
+            if isinstance(
+                command,
+                (
+                    MoveCommand,
+                    AttackMoveCommand,
+                    PatrolCommand,
+                    HoldPositionCommand,
+                    AttackUntilClearCommand,
+                    KiteCommand,
+                ),
+            ):
                 immobile_forms = {
                     "siegetanksieged",
                     "widowmineburrowed",
@@ -2493,6 +3087,15 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     return 0.0
             return (float(ax) - float(bx)) ** 2 + (float(ay) - float(by)) ** 2
 
+        def _location_is_visible(self, point: Any) -> bool:
+            is_visible = getattr(self, "is_visible", None)
+            if not callable(is_visible):
+                return False
+            try:
+                return bool(is_visible(point))
+            except (AttributeError, TypeError, ValueError):
+                return False
+
         def _game_time_now(self) -> float:
             game_time = getattr(self, "time", None)
             return (
@@ -2662,7 +3265,9 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 normalize_name(str(raw_target_name)) if raw_target_name else ""
             )
             target_tag = getattr(command, "target_tag", None)
-            if target_name in TARGET_SELECTORS:
+            if target_name == "nearest_destructible":
+                targets = []
+            elif target_name in TARGET_SELECTORS:
                 targets = self._friendly_target_candidates(target_name)
             elif target_name:
                 targets = list(self._select_exact_units(target_name))
@@ -3406,6 +4011,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                     else None
                 )
             target_name = normalize_name(str(explicit)) if explicit else ""
+            if target_name == "nearest_destructible":
+                return None
             if (
                 alliance == "enemy"
                 or target_name.startswith("nearest_enemy")
@@ -3483,6 +4090,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 "highest_energy_enemy",
             }:
                 return alliance == "enemy"
+            if target_name == "nearest_destructible":
+                return alliance == "neutral"
             if target_name == "nearest_enemy_structure":
                 return alliance == "enemy" and bool(
                     getattr(candidate, "is_structure", False)
@@ -3506,6 +4115,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 "nearest_enemy_detector": lambda unit: bool(
                     getattr(unit, "is_detector", False)
                 ),
+                "nearest_enemy_cloaked": lambda unit: bool(
+                    getattr(unit, "is_cloaked", False)
+                    or getattr(unit, "is_burrowed", False)
+                ),
             }
             enemy_predicate = enemy_predicates.get(target_name)
             if enemy_predicate is not None:
@@ -3528,6 +4141,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
         def _enemy_target_candidates(
             self, selector: str, ability_key: str
         ) -> list[Any]:
+            if selector == "nearest_destructible":
+                return []
             if selector == "nearest_enemy_structure":
                 candidates = list(getattr(self, "enemy_structures", []))
             else:
@@ -3553,6 +4168,10 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 ),
                 "nearest_enemy_detector": lambda unit: bool(
                     getattr(unit, "is_detector", False)
+                ),
+                "nearest_enemy_cloaked": lambda unit: bool(
+                    getattr(unit, "is_cloaked", False)
+                    or getattr(unit, "is_burrowed", False)
                 ),
             }
             predicate = predicates.get(selector)
@@ -3782,6 +4401,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 self._action_started_at_loop_time = None
                 self._action_context = {}
                 self._production_policies = []
+                self._control_flow_states = {}
+                self._timeout_scope_states = {}
                 self._plan_finished_at_loop_time = None
                 self._print_plan_loaded()
                 return
@@ -3988,6 +4609,11 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, AttackEnemyCommand):
                 verb = "focus fire" if action.wait_for_target_death else "attack"
                 return f"{verb} visible enemy with {action.unit}"
+            if isinstance(action, AttackUntilClearCommand):
+                return (
+                    f"attack with {action.unit} until "
+                    f"{_MoveUnitBot._describe_location(action)} is clear"
+                )
             if isinstance(action, KiteCommand):
                 return (
                     f"kite {action.target_unit} with {action.unit} for "
@@ -4005,7 +4631,33 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
                 return f"wait {action.seconds:g} second(s)"
             if isinstance(action, WaitUntilCommand):
                 target = f" {action.target}" if action.target else ""
-                return f"{action.condition}{target} >= {action.at_least:g}"
+                comparison = {
+                    "gte": ">=",
+                    "lte": "<=",
+                    "eq": "==",
+                    "neq": "!=",
+                    "gt": ">",
+                    "lt": "<",
+                }.get(action.comparison, action.comparison)
+                qualifier = action.ability or action.actor or ""
+                if qualifier and not target:
+                    target = f" {qualifier}"
+                return (
+                    f"{action.condition}{target} {comparison} {action.at_least:g}"
+                )
+            if isinstance(action, ConditionalCommand):
+                return (
+                    f"conditional ({len(action.then_actions)} then / "
+                    f"{len(action.else_actions)} else actions)"
+                )
+            if isinstance(action, RepeatCommand):
+                verb = "repeat until condition" if action.until is not None else "repeat"
+                return f"{verb} up to {action.max_cycles} cycle(s)"
+            if isinstance(action, WithTimeoutCommand):
+                return (
+                    f"run {len(action.actions)} action(s) with "
+                    f"{action.timeout_seconds:g}s timeout"
+                )
             if isinstance(action, GatherMineralsCommand):
                 return f"gather minerals with {action.unit}"
             if isinstance(action, GatherGasCommand):
@@ -4021,6 +4673,8 @@ def create_move_unit_bot_class(bot_ai_base, point2_class):
             if isinstance(action, ProductionPolicyCommand):
                 verb = "maintain production" if action.background else "produce"
                 return f"{verb} {action.unit} until {action.target_count}"
+            if isinstance(action, StopProductionCommand):
+                return f"stop production policy {action.unit or 'all'}"
             if isinstance(action, BuildStructureCommand):
                 return (
                     f"build {action.building}"

@@ -16,10 +16,15 @@ from starcraft_llm.command_catalog import (
     ADDON_SPECS,
     ATTACK_CAPABLE_UNIT_KEYS,
     BUNKER_LOADABLE_UNIT_KEYS,
+    CONDITION_COMPARISON_KEYS,
+    CONDITION_KEYS,
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
     LIFTABLE_STRUCTURE_KEYS,
+    MAX_CONDITION_TERMS,
+    MAX_CONTROL_BRANCH_ACTIONS,
     MAX_POLICY_SECONDS,
+    MAX_REPEAT_CYCLES,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
@@ -33,6 +38,7 @@ from starcraft_llm.command_catalog import (
     TRANSFORM_ABILITY_KEYS,
     TRANSPORT_ACTOR_KEYS,
     UNIT_SPECS,
+    UNIT_FORM_SPECS,
     UPGRADE_SPECS,
 )
 from starcraft_llm.strategy import (
@@ -40,6 +46,7 @@ from starcraft_llm.strategy import (
     StrategyParseError,
     StrategyPlan,
     strategy_plan_from_dict,
+    strategy_plan_to_dict,
 )
 
 
@@ -49,6 +56,22 @@ def _command(action_type: str, **arguments: Any) -> StrategyAction:
         {key: value for key, value in arguments.items() if value is not None}
     )
     return strategy_plan_from_dict([payload]).actions[0]
+
+
+def _nested_action_payloads(
+    actions: Iterable[Mapping[str, Any] | StrategyAction],
+) -> list[dict[str, Any]]:
+    values = list(actions)
+    payloads: list[dict[str, Any]] = []
+    for action in values:
+        if isinstance(action, Mapping):
+            payloads.append(dict(action))
+            continue
+        serialized = strategy_plan_to_dict(StrategyPlan(actions=(action,)))["actions"][
+            0
+        ]
+        payloads.append(dict(serialized))
+    return payloads
 
 
 def move(
@@ -154,6 +177,7 @@ def attack_target(
     unit: str = "marine",
     target_unit: Optional[str] = None,
     target_tag: Optional[int | str] = None,
+    target_alliance: str = "enemy",
     selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
 ) -> StrategyAction:
@@ -162,6 +186,7 @@ def attack_target(
         unit=unit,
         target_unit=target_unit,
         target_tag=target_tag,
+        target_alliance=target_alliance,
         selection=selection,
         queued=queued,
     )
@@ -171,6 +196,7 @@ def focus_fire(
     unit: str = "marine",
     target_unit: Optional[str] = None,
     target_tag: Optional[int | str] = None,
+    target_alliance: str = "enemy",
     selection: Optional[Mapping[str, Any]] = None,
     queued: bool = False,
     timeout_seconds: float = 60,
@@ -180,9 +206,39 @@ def focus_fire(
         unit=unit,
         target_unit=target_unit,
         target_tag=target_tag,
+        target_alliance=target_alliance,
         selection=selection,
         queued=queued,
         timeout_seconds=timeout_seconds,
+    )
+
+
+def attack_until_clear(
+    unit: str,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    location: Optional[str] = None,
+    target_unit: Optional[str] = None,
+    selection: Optional[Mapping[str, Any]] = None,
+    radius: float = 16,
+    arrival_tolerance: float = 5,
+    clear_seconds: float = 2,
+    timeout_seconds: float = 180,
+    on_timeout: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "attack_until_clear",
+        unit=unit,
+        x=x,
+        y=y,
+        location=location,
+        target_unit=target_unit,
+        selection=selection,
+        radius=radius,
+        arrival_tolerance=arrival_tolerance,
+        clear_seconds=clear_seconds,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
     )
 
 
@@ -269,8 +325,14 @@ def wait(seconds: float) -> StrategyAction:
 
 def wait_until(
     condition: str,
-    at_least: float = 1,
+    at_least: Optional[float] = None,
+    at_most: Optional[float] = None,
+    equals: Optional[float] = None,
+    value: Optional[float] = None,
+    comparison: Optional[str] = None,
     target: Optional[str] = None,
+    ability: Optional[str] = None,
+    actor: Optional[str] = None,
     location: Optional[str] = None,
     x: Optional[float] = None,
     y: Optional[float] = None,
@@ -283,12 +345,133 @@ def wait_until(
         "wait_until",
         condition=condition,
         at_least=at_least,
+        at_most=at_most,
+        equals=equals,
+        value=value,
+        comparison=comparison,
         target=target,
+        ability=ability,
+        actor=actor,
         location=location,
         x=x,
         y=y,
         radius=radius,
         selection=selection,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
+    )
+
+
+def wait_for_ability(
+    ability: str,
+    actor: Optional[str] = None,
+    count: int = 1,
+    selection: Optional[Mapping[str, Any]] = None,
+    timeout_seconds: float = 120,
+    on_timeout: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "wait_for_ability",
+        ability=ability,
+        actor=actor,
+        count=count,
+        selection=selection,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
+    )
+
+
+def wait_for_form(
+    unit: str,
+    form: str,
+    count: int = 1,
+    selection: Optional[Mapping[str, Any]] = None,
+    timeout_seconds: float = 120,
+    on_timeout: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "wait_for_form",
+        unit=unit,
+        form=form,
+        count=count,
+        selection=selection,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
+    )
+
+
+def wait_for_idle(
+    unit: str,
+    count: int = 1,
+    selection: Optional[Mapping[str, Any]] = None,
+    timeout_seconds: float = 120,
+    on_timeout: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "wait_for_idle",
+        unit=unit,
+        count=count,
+        selection=selection,
+        timeout_seconds=timeout_seconds,
+        on_timeout=on_timeout,
+    )
+
+
+def conditional(
+    when: Mapping[str, Any],
+    then_actions: Iterable[Mapping[str, Any] | StrategyAction],
+    else_actions: Optional[Iterable[Mapping[str, Any] | StrategyAction]] = None,
+) -> StrategyAction:
+    return _command(
+        "conditional",
+        when=dict(when),
+        then_actions=_nested_action_payloads(then_actions),
+        else_actions=(
+            _nested_action_payloads(else_actions) if else_actions is not None else None
+        ),
+    )
+
+
+def repeat(
+    actions: Iterable[Mapping[str, Any] | StrategyAction],
+    cycles: int,
+    max_seconds: float = MAX_POLICY_SECONDS,
+    on_exhausted: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "repeat",
+        actions=_nested_action_payloads(actions),
+        cycles=cycles,
+        max_seconds=max_seconds,
+        on_exhausted=on_exhausted,
+    )
+
+
+def repeat_until(
+    until: Mapping[str, Any],
+    actions: Iterable[Mapping[str, Any] | StrategyAction],
+    max_cycles: int = 20,
+    max_seconds: float = 300,
+    on_exhausted: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "repeat_until",
+        until=dict(until),
+        actions=_nested_action_payloads(actions),
+        max_cycles=max_cycles,
+        max_seconds=max_seconds,
+        on_exhausted=on_exhausted,
+    )
+
+
+def with_timeout(
+    actions: Iterable[Mapping[str, Any] | StrategyAction],
+    timeout_seconds: float = 120,
+    on_timeout: str = "replan",
+) -> StrategyAction:
+    return _command(
+        "with_timeout",
+        actions=_nested_action_payloads(actions),
         timeout_seconds=timeout_seconds,
         on_timeout=on_timeout,
     )
@@ -380,6 +563,10 @@ def maintain_production(
         reserve_supply=reserve_supply,
         max_seconds=max_seconds,
     )
+
+
+def stop_production(unit: Optional[str] = None) -> StrategyAction:
+    return _command("stop_production", unit=unit)
 
 
 def build(
@@ -730,6 +917,7 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
         "attack_enemy": attack_enemy,
         "attack_target": attack_target,
         "focus_fire": focus_fire,
+        "attack_until_clear": attack_until_clear,
         "kite": kite,
         "patrol": patrol,
         "hold_position": hold_position,
@@ -737,12 +925,20 @@ LLM_COMMAND_FUNCTIONS: Mapping[str, Callable[..., StrategyAction]] = MappingProx
         "rally": rally,
         "wait": wait,
         "wait_until": wait_until,
+        "wait_for_ability": wait_for_ability,
+        "wait_for_form": wait_for_form,
+        "wait_for_idle": wait_for_idle,
+        "conditional": conditional,
+        "repeat": repeat,
+        "repeat_until": repeat_until,
+        "with_timeout": with_timeout,
         "gather": gather,
         "return_cargo": return_cargo,
         "distribute_workers": distribute_workers,
         "train": train,
         "produce_until": produce_until,
         "maintain_production": maintain_production,
+        "stop_production": stop_production,
         "build": build,
         "expand": expand,
         "build_addon": build_addon,
@@ -1020,6 +1216,61 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         "minimum": 1,
         "maximum": MAX_POLICY_SECONDS,
     }
+    condition_names = list(CONDITION_KEYS)
+    comparison: dict[str, Any] = {
+        "type": "string",
+        "enum": list(CONDITION_COMPARISON_KEYS),
+    }
+    condition_threshold: dict[str, Any] = {
+        "type": "number",
+        "minimum": 0,
+        "maximum": 10000,
+    }
+    atomic_condition = _object_schema(
+        {
+            "condition": {"type": "string", "enum": condition_names},
+            "target": {"type": "string"},
+            "ability": ability,
+            "actor": actor,
+            "at_least": condition_threshold,
+            "at_most": condition_threshold,
+            "equals": condition_threshold,
+            "value": condition_threshold,
+            "comparison": comparison,
+            "location": location,
+            **point,
+            "radius": {"type": "number", "minimum": 0.5, "maximum": 64},
+            "selection": selection,
+        },
+        ("condition",),
+    )
+    condition_group = _object_schema(
+        {
+            "match": {"type": "string", "enum": ["all", "any"]},
+            "conditions": {
+                "type": "array",
+                "items": atomic_condition,
+                "minItems": 1,
+                "maxItems": MAX_CONDITION_TERMS,
+            },
+        },
+        ("match", "conditions"),
+    )
+    condition_expression: dict[str, Any] = {
+        "anyOf": [atomic_condition, condition_group]
+    }
+    nested_action: dict[str, Any] = {
+        "type": "object",
+        "properties": {"type": {"type": "string"}},
+        "required": ["type"],
+        "additionalProperties": True,
+    }
+    nested_actions: dict[str, Any] = {
+        "type": "array",
+        "items": nested_action,
+        "minItems": 1,
+        "maxItems": MAX_CONTROL_BRANCH_ACTIONS,
+    }
     point_order: dict[str, dict[str, Any]] = {
         "location": location,
         **point,
@@ -1089,12 +1340,16 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "attack_target",
-            "Attack a specific visible enemy by selector/type or runtime unit tag.",
+            "Attack a specific visible enemy or neutral destructible by selector/type or runtime unit tag.",
             _one_target_schema(
                 {
                     "unit": attack_actor,
                     "target_unit": enemy_target,
                     "target_tag": tag,
+                    "target_alliance": {
+                        "type": "string",
+                        "enum": ["enemy", "neutral"],
+                    },
                     "selection": selection,
                     "queued": queued,
                 },
@@ -1104,17 +1359,48 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "focus_fire",
-            "Keep selected attack-capable actors focused on one visible enemy until it dies or timeout.",
+            "Keep selected attack-capable actors focused on one visible enemy or neutral destructible until it dies or timeout.",
             _one_target_schema(
                 {
                     "unit": attack_actor,
                     "target_unit": enemy_target,
                     "target_tag": tag,
+                    "target_alliance": {
+                        "type": "string",
+                        "enum": ["enemy", "neutral"],
+                    },
                     "selection": selection,
                     "queued": queued,
                     "timeout_seconds": bounded_policy_seconds,
                 },
                 ("target_unit", "target_tag"),
+                ("unit",),
+            ),
+        ),
+        _function(
+            "attack_until_clear",
+            "Attack into an area and block until it remains visibly/locally clear for a stable bounded window.",
+            _point_target_schema(
+                {
+                    "unit": attack_unit,
+                    "target_unit": enemy_target,
+                    "location": location,
+                    **point,
+                    "selection": selection,
+                    "radius": {"type": "number", "minimum": 1, "maximum": 64},
+                    "arrival_tolerance": {
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 20,
+                    },
+                    "clear_seconds": {
+                        "type": "number",
+                        "minimum": 0.25,
+                        "maximum": 30,
+                    },
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
+                },
                 ("unit",),
             ),
         ),
@@ -1206,37 +1492,21 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
         ),
         _function(
             "wait_until",
-            "Wait for a bounded observed resource, unit, enemy, proximity, cargo, production, tech, or time condition.",
+            "Wait for a comparator-based bounded runtime observation; at_most/equals are first-class and target/ability/form observations are typed locally.",
             _object_schema(
                 {
                     "condition": {
                         "type": "string",
-                        "enum": [
-                            "minerals",
-                            "vespene",
-                            "supply_left",
-                            "supply_used",
-                            "supply_cap",
-                            "structure_count",
-                            "structure_ready",
-                            "structure_pending",
-                            "unit_count",
-                            "townhall_count",
-                            "upgrade_complete",
-                            "game_time",
-                            "army_supply",
-                            "enemy_unit_count",
-                            "enemy_structure_count",
-                            "idle_structure_count",
-                            "producer_available",
-                            "cargo_used",
-                            "unit_near_location",
-                            "enemy_near_location",
-                            "under_attack",
-                        ],
+                        "enum": condition_names,
                     },
                     "target": {"type": "string"},
-                    "at_least": {"type": "number", "minimum": 0, "maximum": 10000},
+                    "ability": ability,
+                    "actor": actor,
+                    "at_least": condition_threshold,
+                    "at_most": condition_threshold,
+                    "equals": condition_threshold,
+                    "value": condition_threshold,
+                    "comparison": comparison,
                     "location": location,
                     **point,
                     "radius": {"type": "number", "minimum": 0.5, "maximum": 64},
@@ -1244,7 +1514,123 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                     "timeout_seconds": bounded_policy_seconds,
                     "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
                 },
-                ("condition", "at_least"),
+                ("condition",),
+            ),
+        ),
+        _function(
+            "wait_for_ability",
+            "Wait until selected actors expose an allowlisted ability as currently available.",
+            _object_schema(
+                {
+                    "ability": ability,
+                    "actor": actor,
+                    "count": selection_count,
+                    "selection": selection,
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
+                },
+                ("ability",),
+            ),
+        ),
+        _function(
+            "wait_for_form",
+            "Wait until selected actors are observed in an exact Terran runtime form.",
+            _object_schema(
+                {
+                    "unit": actor,
+                    "form": {"type": "string", "enum": list(UNIT_FORM_SPECS)},
+                    "count": selection_count,
+                    "selection": selection,
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
+                },
+                ("unit", "form"),
+            ),
+        ),
+        _function(
+            "wait_for_idle",
+            "Wait until a bounded number of selected Terran actors have no active orders.",
+            _object_schema(
+                {
+                    "unit": actor,
+                    "count": selection_count,
+                    "selection": selection,
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {"type": "string", "enum": ["replan", "fail"]},
+                },
+                ("unit",),
+            ),
+        ),
+        _function(
+            "conditional",
+            "Evaluate an atomic or all/any condition expression once and splice exactly one validated branch into execution.",
+            _object_schema(
+                {
+                    "when": condition_expression,
+                    "then_actions": nested_actions,
+                    "else_actions": {
+                        "type": "array",
+                        "items": nested_action,
+                        "maxItems": MAX_CONTROL_BRANCH_ACTIONS,
+                    },
+                },
+                ("when", "then_actions"),
+            ),
+        ),
+        _function(
+            "repeat",
+            "Repeat a validated action body for a fixed bounded number of cycles.",
+            _object_schema(
+                {
+                    "actions": nested_actions,
+                    "cycles": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_REPEAT_CYCLES,
+                    },
+                    "max_seconds": bounded_policy_seconds,
+                    "on_exhausted": {
+                        "type": "string",
+                        "enum": ["replan", "fail"],
+                    },
+                },
+                ("actions", "cycles"),
+            ),
+        ),
+        _function(
+            "repeat_until",
+            "Run a validated action body until an atomic or all/any condition expression succeeds, subject to hard cycle/time bounds.",
+            _object_schema(
+                {
+                    "until": condition_expression,
+                    "actions": nested_actions,
+                    "max_cycles": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": MAX_REPEAT_CYCLES,
+                    },
+                    "max_seconds": bounded_policy_seconds,
+                    "on_exhausted": {
+                        "type": "string",
+                        "enum": ["replan", "fail", "continue"],
+                    },
+                },
+                ("until", "actions"),
+            ),
+        ),
+        _function(
+            "with_timeout",
+            "Run nested actions under one outer game-clock deadline so a stalled child replans or fails.",
+            _object_schema(
+                {
+                    "actions": nested_actions,
+                    "timeout_seconds": bounded_policy_seconds,
+                    "on_timeout": {
+                        "type": "string",
+                        "enum": ["replan", "fail"],
+                    },
+                },
+                ("actions",),
             ),
         ),
         _function(
@@ -1345,6 +1731,13 @@ def llm_command_function_schemas() -> tuple[dict[str, Any], ...]:
                     "max_seconds": bounded_policy_seconds,
                 },
                 ("unit", "target_count"),
+            ),
+        ),
+        _function(
+            "stop_production",
+            "Stop one or all registered background production policies; already queued units remain queued.",
+            _object_schema(
+                {"unit": {"type": "string", "enum": list(UNIT_SPECS)}}
             ),
         ),
         _function(
@@ -1615,10 +2008,12 @@ __all__ = (
     "attack_enemy",
     "attack_move",
     "attack_target",
+    "attack_until_clear",
     "focus_fire",
     "build",
     "build_addon",
     "create_plan",
+    "conditional",
     "distribute_workers",
     "expand",
     "gather",
@@ -1635,6 +2030,7 @@ __all__ = (
     "research",
     "return_cargo",
     "maintain_production",
+    "stop_production",
     "build_nuke",
     "call_down_mule",
     "cancel",
@@ -1644,6 +2040,8 @@ __all__ = (
     "lift",
     "load",
     "replan",
+    "repeat",
+    "repeat_until",
     "salvage",
     "scan",
     "supply_drop",
@@ -1655,5 +2053,9 @@ __all__ = (
     "train",
     "produce_until",
     "wait",
+    "wait_for_ability",
+    "wait_for_form",
+    "wait_for_idle",
     "wait_until",
+    "with_timeout",
 )

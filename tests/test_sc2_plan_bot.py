@@ -136,7 +136,26 @@ class GameStateBotTest(unittest.TestCase):
         bot = FakeBotAI()
         marine = FakeUnit("MARINE")
         bot.units = FakeUnits([bot.workers[0], marine, bot.townhalls[0]])
-        bot.enemy_units = FakeUnits([FakeUnit("ZERGLING")])
+        enemy = FakeUnit("ZERGLING")
+        enemy.is_cloaked = True
+        bot.enemy_units = FakeUnits([enemy])
+        bot.destructables = FakeUnits(
+            [FakeUnit("DESTRUCTIBLEROCKEX1DIAGONALHUGE")]
+        )
+        bot.enemy_race = type("Race", (), {"name": "Zerg"})()
+        bot.game_info = type(
+            "GameInfo", (), {"map_name": "AbyssalReefLE", "map_center": (50, 50)}
+        )()
+        bot.state = type(
+            "State",
+            (),
+            {
+                "upgrades": set(),
+                "alerts": (
+                    type("Alert", (), {"name": "NuclearLaunchDetected"})(),
+                ),
+            },
+        )()
 
         summary = summarize_bot_state(bot)
 
@@ -153,6 +172,22 @@ class GameStateBotTest(unittest.TestCase):
         self.assertEqual(summary.structures_pending, {})
         self.assertEqual(summary.known_enemy_units, 1)
         self.assertEqual(summary.game_time_seconds, 7.25)
+        self.assertEqual(summary.enemy_race, "zerg")
+        self.assertEqual(summary.map_name, "AbyssalReefLE")
+        self.assertEqual(summary.active_alerts, ("nuclear_launch_detected",))
+        enemy_observation = next(
+            observation
+            for observation in summary.unit_observations
+            if observation.alliance == "enemy"
+        )
+        self.assertTrue(enemy_observation.is_cloaked)
+        self.assertTrue(
+            any(
+                observation.alliance == "neutral"
+                and observation.unit == "destructiblerockex1diagonalhuge"
+                for observation in summary.unit_observations
+            )
+        )
 
     def test_game_state_bot_captures_summary_and_leaves(self):
         bot_class = create_game_state_bot_class(FakeBotAI)

@@ -58,6 +58,15 @@ NEW_FUNCTIONS = {
     "return_cargo",
     "produce_until",
     "maintain_production",
+    "stop_production",
+    "attack_until_clear",
+    "wait_for_ability",
+    "wait_for_form",
+    "wait_for_idle",
+    "conditional",
+    "repeat",
+    "repeat_until",
+    "with_timeout",
 }
 
 EXPECTED_PUBLIC_FUNCTIONS = LEGACY_FUNCTIONS | NEW_FUNCTIONS
@@ -336,6 +345,29 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
             "return_cargo": {"unit": "worker"},
             "produce_until": {"unit": "marine", "target_count": 16},
             "maintain_production": {"unit": "marine", "target_count": 16},
+            "stop_production": {"unit": "marine"},
+            "attack_until_clear": {"unit": "marine", "location": "enemy_main"},
+            "wait_for_ability": {"ability": "scan"},
+            "wait_for_form": {
+                "unit": "siege_tank",
+                "form": "siege_tank_sieged",
+            },
+            "wait_for_idle": {"unit": "marine"},
+            "conditional": {
+                "when": {"condition": "enemy_unit_count", "at_least": 1},
+                "then_actions": [{"type": "attack_enemy", "unit": "marine"}],
+            },
+            "repeat": {
+                "actions": [{"type": "wait", "seconds": 1}],
+                "cycles": 2,
+            },
+            "repeat_until": {
+                "until": {"condition": "enemy_structure_count", "at_most": 0},
+                "actions": [{"type": "attack_enemy", "unit": "marine"}],
+            },
+            "with_timeout": {
+                "actions": [{"type": "train", "unit": "marine"}],
+            },
         }
 
         for name in NEW_FUNCTIONS:
@@ -396,6 +428,72 @@ class CompleteTerranCatalogAndSchemaTest(unittest.TestCase):
                 self.assertTrue(
                     hasattr(AbilityId, _field(ability_specs[key], "enum_name"))
                 )
+
+    def test_every_runtime_actor_ability_has_a_deliberate_command_owner(self):
+        try:
+            from sc2.dicts.unit_abilities import UNIT_ABILITIES
+            from sc2.ids.unit_typeid import UnitTypeId
+        except ImportError:
+            self.skipTest("BurnySC2 generated melee data is unavailable")
+
+        directly_allowlisted = {
+            spec.enum_name for spec in command_catalog.ABILITY_SPECS.values()
+        }
+        generic_or_wrapped = {
+            "ATTACK_ATTACK",
+            "ATTACK_BATTLECRUISER",
+            "EFFECT_REPAIR_SCV",
+            "EFFECT_SPRAY_TERRAN",  # Cosmetic and intentionally not strategic.
+            "HARVEST_GATHER_SCV",
+            "HOLDPOSITION_HOLD",
+            "HOLDPOSITION_BATTLECRUISER",
+            "MOVE_MOVE",
+            "MOVE_BATTLECRUISER",
+            "PATROL_PATROL",
+            "PATROL_BATTLECRUISER",
+            "RALLY_BUILDING",
+            "RALLY_COMMANDCENTER",
+            "SCAN_MOVE",
+            "SMART",
+            "STOP_STOP",
+            "STOP_BATTLECRUISER",
+        }
+        high_level_prefixes = (
+            "ARMORYRESEARCH_",
+            "BARRACKSTRAIN_",
+            "BARRACKSTECHLABRESEARCH_",
+            "BUILD_REACTOR_",
+            "BUILD_TECHLAB_",
+            "COMMANDCENTERTRAIN_",
+            "ENGINEERINGBAYRESEARCH_",
+            "FACTORYTRAIN_",
+            "FUSIONCORERESEARCH_",
+            "RESEARCH_",
+            "STARPORTTECHLABRESEARCH_",
+            "STARPORTTRAIN_",
+            "TERRANBUILD_",
+            "TRAIN_",
+            "UPGRADETOORBITAL_",
+            "UPGRADETOPLANETARYFORTRESS_",
+        )
+        uncovered = {}
+        for actor, enum_names in command_catalog.RUNTIME_ACTOR_UNIT_TYPES.items():
+            missing = set()
+            for enum_name in enum_names:
+                unit_type = getattr(UnitTypeId, enum_name)
+                for ability in UNIT_ABILITIES.get(unit_type, set()):
+                    ability_name = ability.name
+                    if ability_name in directly_allowlisted:
+                        continue
+                    if ability_name in generic_or_wrapped:
+                        continue
+                    if ability_name.startswith(high_level_prefixes):
+                        continue
+                    missing.add(ability_name)
+            if missing:
+                uncovered[actor] = sorted(missing)
+
+        self.assertEqual(uncovered, {})
 
     def test_unit_structure_and_upgrade_catalogs_match_burnysc2_melee_data(self):
         try:
@@ -909,6 +1007,7 @@ class CompleteTerranRoundTripAndValidationTest(unittest.TestCase):
                     unit="orbital_command",
                     energy=63,
                     is_flying=False,
+                    is_cloaked=False,
                     is_burrowed=False,
                     cargo_used=0,
                     cargo_max=0,
@@ -936,6 +1035,7 @@ class CompleteTerranRoundTripAndValidationTest(unittest.TestCase):
                     "unit": "orbital_command",
                     "energy": 63,
                     "is_flying": False,
+                    "is_cloaked": False,
                     "is_burrowed": False,
                     "cargo_used": 0,
                     "cargo_max": 0,
@@ -1269,7 +1369,7 @@ class CompleteTerranFakeExecutorTest(unittest.TestCase):
         self.assertEqual(bot.marine_a.issued[0][0], "ATTACK")
         self.assertIs(bot.marine_a.issued[0][1][0], bot.enemy_structure)
 
-    def test_basic_movement_skips_immobile_runtime_forms(self):
+    def test_mobile_orders_skip_immobile_runtime_forms(self):
         class MixedFormBotAI(AbilityFakeBotAI):
             def __init__(self):
                 super().__init__()
@@ -1279,10 +1379,26 @@ class CompleteTerranFakeExecutorTest(unittest.TestCase):
 
         bot = _run_fake_plan(
             MixedFormBotAI,
-            [{"type": "move", "unit": "siege_tank", "location": "enemy_main"}],
+            [
+                {"type": "move", "unit": "siege_tank", "location": "enemy_main"},
+                {
+                    "type": "attack_move",
+                    "unit": "siege_tank",
+                    "location": "enemy_main",
+                },
+                {
+                    "type": "kite",
+                    "unit": "siege_tank",
+                    "target_unit": "nearest_enemy",
+                    "duration_seconds": 1,
+                },
+            ],
         )
 
-        self.assertEqual(bot.mobile_tank.issued[0][0], "MOVE")
+        self.assertEqual(
+            [order[0] for order in bot.mobile_tank.issued],
+            ["MOVE", "ATTACK", "ATTACK"],
+        )
         self.assertEqual(bot.sieged_tank.issued, [])
 
     def test_mule_targets_a_mineral_unit_and_load_count_queues_every_passenger(self):

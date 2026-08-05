@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import math
 import re
 from dataclasses import dataclass
@@ -8,14 +9,23 @@ from typing import Any, Iterable, cast
 from starcraft_llm.command_catalog import (
     ABILITY_SPECS,
     ADDON_SPECS,
+    ALERT_KEYS,
     ATTACK_CAPABLE_UNIT_KEYS,
     BIOLOGICAL_UNIT_KEYS,
     BUNKER_LOADABLE_UNIT_KEYS,
+    CONDITION_COMPARISON_KEYS,
+    CONDITION_KEYS,
+    ENEMY_RACE_KEYS,
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
+    MAX_CONDITION_TERMS,
+    MAX_CONTROL_DEPTH,
+    MAX_CONTROL_EXECUTION_ACTIONS,
+    MAX_CONTROL_TOTAL_ACTIONS,
     MAX_PLAN_ACTIONS,
     MAX_POLICY_SECONDS,
     MAX_REPLAN_CYCLES,
+    MAX_REPEAT_CYCLES,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
@@ -26,10 +36,12 @@ from starcraft_llm.command_catalog import (
     MOVABLE_SPECIAL_UNIT_KEYS,
     PSIONIC_UNIT_KEYS,
     REPAIRABLE_TARGET_KEYS,
+    RUNTIME_ACTOR_UNIT_TYPES,
     SPECIAL_UNIT_SPECS,
     STRUCTURE_SPECS,
     TARGET_SELECTORS,
     UNIT_SPECS,
+    UNIT_FORM_SPECS,
     UPGRADE_SPECS,
     EntitySpec,
     canonical_runtime_actor_name,
@@ -40,9 +52,14 @@ from starcraft_llm.game_state import GameStateSummary
 from starcraft_llm.strategy import (
     AttackEnemyCommand,
     AttackMoveCommand,
+    AttackUntilClearCommand,
     BuildAddonCommand,
     BuildStructureCommand,
     DistributeWorkersCommand,
+    ConditionExpression,
+    ConditionGroup,
+    ConditionSpec,
+    ConditionalCommand,
     ExpandCommand,
     GatherGasCommand,
     GatherMineralsCommand,
@@ -52,17 +69,20 @@ from starcraft_llm.strategy import (
     MoveCommand,
     PatrolCommand,
     ProductionPolicyCommand,
+    RepeatCommand,
     RallyCommand,
     RepairCommand,
     ReplanCommand,
     ResearchUpgradeCommand,
     ReturnCargoCommand,
     StopCommand,
+    StopProductionCommand,
     StrategyPlan,
     TrainUnitCommand,
     UseAbilityCommand,
     WaitCommand,
     WaitUntilCommand,
+    WithTimeoutCommand,
 )
 
 
@@ -70,29 +90,8 @@ class PlanValidationError(ValueError):
     """Raised when a StrategyPlan is unsupported or unsafe to execute."""
 
 
-_SUPPORTED_WAIT_CONDITIONS = {
-    "minerals",
-    "vespene",
-    "supply_left",
-    "supply_used",
-    "supply_cap",
-    "structure_count",
-    "structure_ready",
-    "structure_pending",
-    "unit_count",
-    "townhall_count",
-    "upgrade_complete",
-    "game_time",
-    "army_supply",
-    "enemy_unit_count",
-    "enemy_structure_count",
-    "idle_structure_count",
-    "producer_available",
-    "cargo_used",
-    "unit_near_location",
-    "enemy_near_location",
-    "under_attack",
-}
+_SUPPORTED_WAIT_CONDITIONS = frozenset(CONDITION_KEYS)
+_SUPPORTED_COMPARISONS = frozenset(CONDITION_COMPARISON_KEYS)
 
 DEFAULT_MAX_ACTIONS = MAX_PLAN_ACTIONS
 MAX_TRAIN_OR_SELECTION_COUNT = MAX_SELECTION_COUNT
@@ -274,98 +273,424 @@ def validate_strategy_plan(
         raise PlanValidationError(
             f"strategy plan has too many actions: {len(plan.actions)} > {max_actions}"
         )
-    replan_actions = sum(1 for action in plan.actions if _is_replan_action(action))
+    defined_actions = _defined_action_count(plan.actions)
+    if defined_actions > MAX_CONTROL_TOTAL_ACTIONS:
+        raise PlanValidationError(
+            "strategy plan defines too many top-level/nested actions: "
+            f"{defined_actions} > {MAX_CONTROL_TOTAL_ACTIONS}"
+        )
+    execution_actions = _maximum_execution_action_count(plan.actions)
+    if execution_actions > MAX_CONTROL_EXECUTION_ACTIONS:
+        raise PlanValidationError(
+            "strategy plan expands to too many bounded runtime actions: "
+            f"{execution_actions} > {MAX_CONTROL_EXECUTION_ACTIONS}"
+        )
+    replan_actions = _replan_action_count(plan.actions)
     if replan_actions > MAX_REPLANS:
         raise PlanValidationError(
             f"strategy plan has too many replan actions: {replan_actions} > {MAX_REPLANS}"
         )
 
     state = _PlanState.from_summary(game_state)
-    for index, action in enumerate(plan.actions, start=1):
-        if isinstance(action, MoveCommand):
-            _validate_move(action, index, state, min_coordinate, max_coordinate)
-        elif isinstance(action, AttackMoveCommand):
-            _validate_point_action(
-                action,
-                action.unit,
-                index,
-                state,
-                "attack",
-                min_coordinate,
-                max_coordinate,
-            )
-        elif isinstance(action, AttackEnemyCommand):
-            _validate_unit(action.unit, index, "attack enemy")
-            _validate_selection(action.selection, index)
-            _validate_attack_target(action, index)
-            _validate_queued(action, index)
-            _validate_focus_fire(action, index)
-        elif isinstance(action, KiteCommand):
-            _validate_kite(action, index, state)
-        elif isinstance(action, PatrolCommand):
-            _validate_point_action(
-                action,
-                action.unit,
-                index,
-                state,
-                "patrol",
-                min_coordinate,
-                max_coordinate,
-            )
-        elif isinstance(action, HoldPositionCommand):
-            _validate_unit(action.unit, index, "hold")
-            _validate_selection(action.selection, index)
-            _validate_queued(action, index)
-        elif isinstance(action, StopCommand):
-            _validate_unit(action.unit, index, "stop")
-            _validate_selection(action.selection, index)
-            _validate_queued(action, index)
-        elif isinstance(action, RallyCommand):
-            _validate_rally(action, index, state, min_coordinate, max_coordinate)
-        elif isinstance(action, WaitCommand):
-            _validate_wait(action, index)
-        elif isinstance(action, WaitUntilCommand):
-            _validate_wait_until(action, index, state)
-        elif isinstance(action, GatherMineralsCommand):
-            _validate_gather(
-                action, index, state, "minerals", min_coordinate, max_coordinate
-            )
-        elif isinstance(action, GatherGasCommand):
-            _validate_gather(
-                action, index, state, "gas", min_coordinate, max_coordinate
-            )
-        elif isinstance(action, ReturnCargoCommand):
-            _validate_return_cargo(action, index, state)
-        elif isinstance(action, DistributeWorkersCommand):
-            _validate_distribute_workers(action, index, state)
-        elif isinstance(action, TrainUnitCommand):
-            _validate_train(action, index, state)
-        elif isinstance(action, ProductionPolicyCommand):
-            _validate_production_policy(action, index, state)
-        elif isinstance(action, BuildStructureCommand):
-            _validate_build(action, index, state, min_coordinate, max_coordinate)
-        elif isinstance(action, ExpandCommand):
-            _validate_expand(action, index, state)
-        elif isinstance(action, BuildAddonCommand):
-            _validate_addon(action, index, state)
-        elif isinstance(action, MorphStructureCommand):
-            _validate_morph(action, index, state)
-        elif isinstance(action, ResearchUpgradeCommand):
-            _validate_research(action, index, state)
-        elif isinstance(action, RepairCommand):
-            _validate_repair(action, index, state)
-        elif _is_replan_action(action):
-            _validate_replan(action, index)
-        elif _is_ability_action(action):
-            _validate_ability_action(
-                action, index, state, min_coordinate, max_coordinate
-            )
-        else:
-            raise PlanValidationError(
-                f"action {index}: unsupported action object: {action!r}"
-            )
+    _validate_action_sequence(
+        plan.actions,
+        state,
+        min_coordinate,
+        max_coordinate,
+        control_depth=0,
+    )
 
     return plan
+
+
+def _validate_action_sequence(
+    actions: Iterable[object],
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+    control_depth: int,
+) -> None:
+    for index, action in enumerate(actions, start=1):
+        _validate_single_action(
+            action,
+            index,
+            state,
+            min_coordinate,
+            max_coordinate,
+            control_depth,
+        )
+
+
+def _validate_single_action(
+    action: object,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+    control_depth: int,
+) -> None:
+    if isinstance(action, MoveCommand):
+        _validate_move(action, index, state, min_coordinate, max_coordinate)
+    elif isinstance(action, AttackMoveCommand):
+        _validate_point_action(
+            action,
+            action.unit,
+            index,
+            state,
+            "attack",
+            min_coordinate,
+            max_coordinate,
+        )
+    elif isinstance(action, AttackUntilClearCommand):
+        _validate_attack_until_clear(
+            action, index, state, min_coordinate, max_coordinate
+        )
+    elif isinstance(action, AttackEnemyCommand):
+        _validate_unit(action.unit, index, "attack enemy")
+        _validate_selection(action.selection, index)
+        _validate_attack_target(action, index)
+        _validate_queued(action, index)
+        _validate_focus_fire(action, index)
+    elif isinstance(action, KiteCommand):
+        _validate_kite(action, index, state)
+    elif isinstance(action, PatrolCommand):
+        _validate_point_action(
+            action,
+            action.unit,
+            index,
+            state,
+            "patrol",
+            min_coordinate,
+            max_coordinate,
+        )
+    elif isinstance(action, HoldPositionCommand):
+        _validate_unit(action.unit, index, "hold")
+        _validate_selection(action.selection, index)
+        _validate_queued(action, index)
+    elif isinstance(action, StopCommand):
+        _validate_unit(action.unit, index, "stop")
+        _validate_selection(action.selection, index)
+        _validate_queued(action, index)
+    elif isinstance(action, RallyCommand):
+        _validate_rally(action, index, state, min_coordinate, max_coordinate)
+    elif isinstance(action, WaitCommand):
+        _validate_wait(action, index)
+    elif isinstance(action, WaitUntilCommand):
+        _validate_wait_until(action, index, state)
+    elif isinstance(action, ConditionalCommand):
+        _validate_conditional(
+            action,
+            index,
+            state,
+            min_coordinate,
+            max_coordinate,
+            control_depth,
+        )
+    elif isinstance(action, RepeatCommand):
+        _validate_repeat(
+            action,
+            index,
+            state,
+            min_coordinate,
+            max_coordinate,
+            control_depth,
+        )
+    elif isinstance(action, WithTimeoutCommand):
+        _validate_with_timeout(
+            action,
+            index,
+            state,
+            min_coordinate,
+            max_coordinate,
+            control_depth,
+        )
+    elif isinstance(action, GatherMineralsCommand):
+        _validate_gather(
+            action, index, state, "minerals", min_coordinate, max_coordinate
+        )
+    elif isinstance(action, GatherGasCommand):
+        _validate_gather(
+            action, index, state, "gas", min_coordinate, max_coordinate
+        )
+    elif isinstance(action, ReturnCargoCommand):
+        _validate_return_cargo(action, index, state)
+    elif isinstance(action, DistributeWorkersCommand):
+        _validate_distribute_workers(action, index, state)
+    elif isinstance(action, TrainUnitCommand):
+        _validate_train(action, index, state)
+    elif isinstance(action, ProductionPolicyCommand):
+        _validate_production_policy(action, index, state)
+    elif isinstance(action, StopProductionCommand):
+        _validate_stop_production(action, index, state)
+    elif isinstance(action, BuildStructureCommand):
+        _validate_build(action, index, state, min_coordinate, max_coordinate)
+    elif isinstance(action, ExpandCommand):
+        _validate_expand(action, index, state)
+    elif isinstance(action, BuildAddonCommand):
+        _validate_addon(action, index, state)
+    elif isinstance(action, MorphStructureCommand):
+        _validate_morph(action, index, state)
+    elif isinstance(action, ResearchUpgradeCommand):
+        _validate_research(action, index, state)
+    elif isinstance(action, RepairCommand):
+        _validate_repair(action, index, state)
+    elif _is_replan_action(action):
+        _validate_replan(action, index)
+    elif _is_ability_action(action):
+        _validate_ability_action(
+            action, index, state, min_coordinate, max_coordinate
+        )
+    else:
+        raise PlanValidationError(
+            f"action {index}: unsupported action object: {action!r}"
+        )
+
+
+def _validate_conditional(
+    action: ConditionalCommand,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+    control_depth: int,
+) -> None:
+    _validate_control_depth(index, control_depth)
+    _validate_condition_expression(action.when, index, state)
+    if not action.then_actions:
+        raise PlanValidationError(
+            f"action {index}: conditional then_actions must not be empty"
+        )
+
+    branch_states = []
+    branches = (
+        ("then", action.then_actions, True),
+        ("else", action.else_actions, False),
+    )
+    for branch_name, branch_actions, expected in branches:
+        branch_state = copy.deepcopy(state)
+        _refine_state_for_condition(action.when, branch_state, expected)
+        try:
+            _validate_action_sequence(
+                branch_actions,
+                branch_state,
+                min_coordinate,
+                max_coordinate,
+                control_depth + 1,
+            )
+        except PlanValidationError as exc:
+            raise PlanValidationError(
+                f"action {index} conditional {branch_name} branch: {exc}"
+            ) from exc
+        branch_states.append(branch_state)
+    _copy_plan_state(state, _merge_plan_states(branch_states))
+
+
+def _validate_repeat(
+    action: RepeatCommand,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+    control_depth: int,
+) -> None:
+    _validate_control_depth(index, control_depth)
+    if not action.actions:
+        raise PlanValidationError(f"action {index}: repeat body must not be empty")
+    if (
+        isinstance(action.max_cycles, bool)
+        or not isinstance(action.max_cycles, int)
+        or not 1 <= action.max_cycles <= MAX_REPEAT_CYCLES
+    ):
+        raise PlanValidationError(
+            f"action {index}: repeat max_cycles must be between 1 and {MAX_REPEAT_CYCLES}"
+        )
+    _validate_bounded_seconds(action.max_seconds, index, "repeat timeout")
+    allowed_exhaustion = (
+        {"replan", "fail", "continue"}
+        if action.until is not None
+        else {"replan", "fail"}
+    )
+    if action.on_exhausted not in allowed_exhaustion:
+        raise PlanValidationError(
+            f"action {index}: repeat on_exhausted must be one of "
+            f"{', '.join(sorted(allowed_exhaustion))}"
+        )
+    if action.until is not None:
+        _validate_condition_expression(action.until, index, state)
+
+    body_state = copy.deepcopy(state)
+    validation_cycles = action.max_cycles if action.until is None else 1
+    for cycle in range(1, validation_cycles + 1):
+        try:
+            _validate_action_sequence(
+                action.actions,
+                body_state,
+                min_coordinate,
+                max_coordinate,
+                control_depth + 1,
+            )
+        except PlanValidationError as exc:
+            cycle_text = f" cycle {cycle}" if validation_cycles > 1 else ""
+            raise PlanValidationError(
+                f"action {index} repeat body{cycle_text}: {exc}"
+            ) from exc
+
+    # A conditional repeat may execute zero times, so only facts common to both
+    # paths are guaranteed. A fixed repeat has an exact bounded cycle count and
+    # is fully simulated; the expansion-cost guard prevents exponential work.
+    if action.until is None:
+        _copy_plan_state(state, body_state)
+    else:
+        merged_state = _merge_plan_states([copy.deepcopy(state), body_state])
+        if action.on_exhausted != "continue":
+            # In this plan, a timeout is terminal/replanned. Reaching the next
+            # action therefore proves that the repeat-until condition was true.
+            _refine_state_for_condition(action.until, merged_state, True)
+        _copy_plan_state(state, merged_state)
+
+
+def _validate_with_timeout(
+    action: WithTimeoutCommand,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+    control_depth: int,
+) -> None:
+    _validate_control_depth(index, control_depth)
+    if not action.actions:
+        raise PlanValidationError(
+            f"action {index}: with-timeout body must not be empty"
+        )
+    _validate_bounded_seconds(action.timeout_seconds, index, "with-timeout deadline")
+    if action.on_timeout not in {"replan", "fail"}:
+        raise PlanValidationError(
+            f"action {index}: with-timeout on_timeout must be replan or fail"
+        )
+    try:
+        _validate_action_sequence(
+            action.actions,
+            state,
+            min_coordinate,
+            max_coordinate,
+            control_depth + 1,
+        )
+    except PlanValidationError as exc:
+        raise PlanValidationError(f"action {index} with-timeout body: {exc}") from exc
+
+
+def _validate_control_depth(index: int, control_depth: int) -> None:
+    if control_depth >= MAX_CONTROL_DEPTH:
+        raise PlanValidationError(
+            f"action {index}: control-flow nesting exceeds {MAX_CONTROL_DEPTH}"
+        )
+
+
+def _merge_plan_states(states: list[_PlanState]) -> _PlanState:
+    if not states:
+        raise ValueError("at least one plan state is required")
+    merged = copy.deepcopy(states[0])
+    if not merged.known:
+        return merged
+    merged.minerals = min(state.minerals for state in states)
+    merged.vespene = min(state.vespene for state in states)
+    merged.supply_used = max(state.supply_used for state in states)
+    merged.supply_cap = min(state.supply_cap for state in states)
+    merged.supply_left = min(state.supply_left for state in states)
+    merged.workers = min(state.workers for state in states)
+    merged.townhalls = min(state.townhalls for state in states)
+    merged.game_time = min(state.game_time for state in states)
+    for field_name in (
+        "structures",
+        "structures_ready",
+        "structures_pending",
+        "units",
+        "production_targets",
+    ):
+        dictionaries = [getattr(state, field_name) for state in states]
+        keys = set().union(*(dictionary.keys() for dictionary in dictionaries))
+        setattr(
+            merged,
+            field_name,
+            {
+                key: min(dictionary.get(key, 0) for dictionary in dictionaries)
+                for key in keys
+                if min(dictionary.get(key, 0) for dictionary in dictionaries) > 0
+            },
+        )
+    merged.upgrades = set.intersection(*(set(state.upgrades) for state in states))
+    merged.upgrades_planned = set.intersection(
+        *(set(state.upgrades_planned) for state in states)
+    )
+    common_policies = set.intersection(
+        *(set(state.production_policies) for state in states)
+    )
+    merged.production_policies = {
+        key: states[0].production_policies[key]
+        for key in common_policies
+        if all(
+            state.production_policies.get(key)
+            == states[0].production_policies[key]
+            for state in states
+        )
+    }
+    return merged
+
+
+def _copy_plan_state(destination: _PlanState, source: _PlanState) -> None:
+    for field_name in destination.__dataclass_fields__:
+        setattr(destination, field_name, copy.deepcopy(getattr(source, field_name)))
+
+
+def _defined_action_count(actions: Iterable[object]) -> int:
+    total = 0
+    for action in actions:
+        total += 1
+        if isinstance(action, ConditionalCommand):
+            total += _defined_action_count(action.then_actions)
+            total += _defined_action_count(action.else_actions)
+        elif isinstance(action, RepeatCommand):
+            total += _defined_action_count(action.actions)
+        elif isinstance(action, WithTimeoutCommand):
+            total += _defined_action_count(action.actions)
+    return total
+
+
+def _maximum_execution_action_count(actions: Iterable[object]) -> int:
+    """Conservatively bound the dispatches produced by nested control flow."""
+
+    total = 0
+    for action in actions:
+        if isinstance(action, ConditionalCommand):
+            total += 1 + max(
+                _maximum_execution_action_count(action.then_actions),
+                _maximum_execution_action_count(action.else_actions),
+            )
+        elif isinstance(action, RepeatCommand):
+            body = _maximum_execution_action_count(action.actions)
+            total += 1 + action.max_cycles * (body + 1)
+        elif isinstance(action, WithTimeoutCommand):
+            total += 2 + _maximum_execution_action_count(action.actions)
+        else:
+            total += 1
+        if total > MAX_CONTROL_EXECUTION_ACTIONS:
+            return total
+    return total
+
+
+def _replan_action_count(actions: Iterable[object]) -> int:
+    total = 0
+    for action in actions:
+        if _is_replan_action(action):
+            total += 1
+        elif isinstance(action, ConditionalCommand):
+            total += _replan_action_count(action.then_actions)
+            total += _replan_action_count(action.else_actions)
+        elif isinstance(action, RepeatCommand):
+            total += _replan_action_count(action.actions)
+        elif isinstance(action, WithTimeoutCommand):
+            total += _replan_action_count(action.actions)
+    return total
 
 
 def _validate_point_action(
@@ -394,6 +719,52 @@ def _validate_point_action(
         min_coordinate,
         max_coordinate,
     )
+
+
+def _validate_attack_until_clear(
+    action: AttackUntilClearCommand,
+    index: int,
+    state: _PlanState,
+    min_coordinate: float,
+    max_coordinate: float,
+) -> None:
+    _validate_point_action(
+        action,
+        action.unit,
+        index,
+        state,
+        "attack",
+        min_coordinate,
+        max_coordinate,
+    )
+    if action.target_unit is not None:
+        target = normalize_name(action.target_unit)
+        if target in TARGET_SELECTORS and not (
+            target.startswith("nearest_enemy") or target.endswith("_enemy")
+        ):
+            raise PlanValidationError(
+                f"action {index}: attack-until-clear target must be an enemy selector/type"
+            )
+        if not re.fullmatch(r"[a-z0-9_]{1,64}", target):
+            raise PlanValidationError(
+                f"action {index}: invalid attack-until-clear enemy target"
+            )
+    for field_name, value, minimum, maximum in (
+        ("radius", action.radius, 1, 64),
+        ("arrival tolerance", action.arrival_tolerance, 0.5, 20),
+        ("clear seconds", action.clear_seconds, 0.25, 30),
+    ):
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise PlanValidationError(
+                f"action {index}: attack-until-clear {field_name} must be between {minimum} and {maximum}"
+            )
+    _validate_bounded_seconds(
+        action.timeout_seconds, index, "attack-until-clear timeout"
+    )
+    if action.on_timeout not in {"replan", "fail"}:
+        raise PlanValidationError(
+            f"action {index}: attack-until-clear on_timeout must be replan or fail"
+        )
 
 
 def _validate_move(
@@ -466,17 +837,30 @@ def _validate_move(
 def _validate_attack_target(action: AttackEnemyCommand, index: int) -> None:
     target_tag = getattr(action, "target_tag", None)
     target_unit = getattr(action, "target_unit", None)
+    target_alliance = getattr(action, "target_alliance", "enemy")
+    if target_alliance not in {"enemy", "neutral"}:
+        raise PlanValidationError(
+            f"action {index}: attack target alliance must be enemy or neutral"
+        )
+    if target_alliance == "neutral" and target_unit is None and target_tag is None:
+        raise PlanValidationError(
+            f"action {index}: neutral attack requires target_unit or target_tag"
+        )
     if target_tag is not None:
         _validate_tag(target_tag, index, "attack target")
     if target_unit is None:
         return
     target_key = normalize_name(str(target_unit))
     if target_key in TARGET_SELECTORS:
-        if not target_key.startswith("nearest_enemy") and not target_key.endswith(
-            "_enemy"
-        ):
+        valid_selector = (
+            target_key == "nearest_destructible"
+            if target_alliance == "neutral"
+            else target_key.startswith("nearest_enemy")
+            or target_key.endswith("_enemy")
+        )
+        if not valid_selector:
             raise PlanValidationError(
-                f"action {index}: attack target selector must select an enemy: {target_key}"
+                f"action {index}: attack target selector does not match {target_alliance} alliance: {target_key}"
             )
         return
     if not re.fullmatch(r"[a-z0-9_]{1,64}", target_key):
@@ -588,35 +972,345 @@ def _validate_wait(action: WaitCommand, index: int) -> None:
         )
 
 
-def _validate_wait_until(
-    action: WaitUntilCommand, index: int, state: _PlanState
+def _validate_condition_expression(
+    expression: ConditionExpression, index: int, state: _PlanState
 ) -> None:
-    if action.condition not in _SUPPORTED_WAIT_CONDITIONS:
+    if isinstance(expression, ConditionSpec):
+        _validate_atomic_condition(expression, index, state)
+        return
+    if not isinstance(expression, ConditionGroup):
         raise PlanValidationError(
-            f"action {index}: unsupported wait-until condition: {action.condition}"
+            f"action {index}: invalid condition expression {expression!r}"
         )
-    if not math.isfinite(action.at_least):
+    if expression.match not in {"all", "any"}:
         raise PlanValidationError(
-            f"action {index}: wait-until threshold must be finite"
+            f"action {index}: condition group match must be all or any"
         )
-    if action.at_least < 0:
+    if not 1 <= len(expression.conditions) <= MAX_CONDITION_TERMS:
         raise PlanValidationError(
-            f"action {index}: wait-until threshold must not be negative"
+            f"action {index}: condition group must contain between 1 and {MAX_CONDITION_TERMS} terms"
         )
-    if action.at_least > 10000:
-        raise PlanValidationError(
-            f"action {index}: wait-until threshold is too high for the MVP"
+    for condition in expression.conditions:
+        _validate_atomic_condition(condition, index, state)
+
+
+_NEGATED_COMPARISON = {
+    "gte": "lt",
+    "lte": "gt",
+    "eq": "neq",
+    "neq": "eq",
+    "gt": "lte",
+    "lt": "gte",
+}
+
+
+def _refine_state_for_condition(
+    expression: ConditionExpression, state: _PlanState, expected: bool
+) -> None:
+    """Apply facts guaranteed by a selected conditional branch.
+
+    This lets a valid adaptive branch consume the resources or prerequisites
+    asserted by its guard without trusting facts that are not logically
+    guaranteed.  ``all``/``any`` groups are handled as conjunctions or merged
+    alternatives according to the expected truth value.
+    """
+
+    if not state.known:
+        return
+    if isinstance(expression, ConditionSpec):
+        comparison = (
+            expression.comparison
+            if expected
+            else _NEGATED_COMPARISON[expression.comparison]
         )
-    _validate_bounded_seconds(action.timeout_seconds, index, "wait-until timeout")
-    if action.on_timeout not in {"replan", "fail"}:
+        _refine_state_for_atomic_truth(expression, comparison, state)
+        return
+
+    is_conjunction = (expression.match == "all") == expected
+    if is_conjunction:
+        for condition in expression.conditions:
+            _refine_state_for_condition(condition, state, expected)
+        return
+
+    alternatives: list[_PlanState] = []
+    for condition in expression.conditions:
+        candidate = copy.deepcopy(state)
+        _refine_state_for_condition(condition, candidate, expected)
+        alternatives.append(candidate)
+    _copy_plan_state(state, _merge_plan_states(alternatives))
+
+
+def _integer_lower_bound(comparison: str, value: float) -> int | None:
+    if comparison == "gte":
+        return max(0, int(math.ceil(value)))
+    if comparison == "gt":
+        return max(0, int(math.floor(value)) + 1)
+    if comparison == "eq" and math.isclose(value, round(value)):
+        return max(0, int(round(value)))
+    if comparison == "neq" and math.isclose(value, 0.0):
+        # Every exposed observation is non-negative, so != 0 guarantees >= 1.
+        return 1
+    return None
+
+
+def _set_structure_floor(
+    state: _PlanState,
+    structure: str,
+    count: int,
+    *,
+    ready: bool = False,
+    pending: bool = False,
+) -> None:
+    if count < 1 or structure not in {
+        *STRUCTURE_SPECS,
+        *ADDON_SPECS,
+        *MORPH_SPECS,
+    }:
+        return
+    state.structures[structure] = max(state.structures.get(structure, 0), count)
+    if ready:
+        state.mark_structure_ready(structure, count, 0)
+    if pending:
+        state.structures_pending[structure] = max(
+            state.structures_pending.get(structure, 0), count
+        )
+
+
+def _set_actor_floor(state: _PlanState, actor: str | None, count: int) -> None:
+    if not actor or actor == "any" or count < 1:
+        return
+    if actor in {*STRUCTURE_SPECS, *ADDON_SPECS, *MORPH_SPECS}:
+        _set_structure_floor(state, actor, count, ready=True)
+        return
+
+    unit_key = "worker" if actor in {"worker", "scv"} else actor
+    if unit_key not in {"worker", *UNIT_SPECS, *SPECIAL_UNIT_SPECS}:
+        return
+    current = state.workers if unit_key == "worker" else state.units.get(unit_key, 0)
+    if current >= count:
+        return
+    missing = count - current
+    state.units[unit_key] = count
+    if unit_key == "worker":
+        state.workers = count
+        supply_spec: EntitySpec | None = UNIT_SPECS["scv"]
+    else:
+        supply_spec = UNIT_SPECS.get(unit_key) or SPECIAL_UNIT_SPECS.get(unit_key)
+    supply = int((getattr(supply_spec, "supply", 0) or 0) * missing)
+    state.supply_used += supply
+    state.supply_left = max(0, state.supply_left - supply)
+
+
+def _set_producer_available_fact(
+    state: _PlanState, unit: str | None, count: int
+) -> None:
+    if not unit or unit not in UNIT_SPECS or count < 1:
+        return
+    spec = UNIT_SPECS[unit]
+    if unit == "scv":
+        state.townhalls = max(state.townhalls, count)
+    elif spec.producer:
+        _set_structure_floor(state, spec.producer, count, ready=True)
+    for prerequisite in spec.prerequisites:
+        _set_structure_floor(state, prerequisite, 1, ready=True)
+    if spec.required_addon:
+        _set_structure_floor(state, spec.required_addon, count, ready=True)
+
+
+def _set_ability_available_fact(
+    state: _PlanState, condition: ConditionSpec, count: int
+) -> None:
+    if not condition.ability or count < 1:
+        return
+    spec = ABILITY_SPECS[condition.ability]
+    actor = condition.actor
+    if actor == "any" and len(spec.actors) == 1:
+        actor = spec.actors[0]
+    _set_actor_floor(state, actor, count)
+    for prerequisite in spec.prerequisites:
+        if prerequisite in UPGRADE_SPECS:
+            state.upgrades.add(prerequisite)
+        else:
+            _set_structure_floor(state, prerequisite, 1, ready=True)
+
+
+def _refine_state_for_atomic_truth(
+    condition: ConditionSpec, comparison: str, state: _PlanState
+) -> None:
+    lower = _integer_lower_bound(comparison, condition.value)
+    if lower is None:
+        return
+
+    name = condition.condition
+    if name == "minerals":
+        state.minerals = max(state.minerals, lower)
+    elif name == "vespene":
+        state.vespene = max(state.vespene, lower)
+    elif name == "supply_left":
+        state.supply_left = max(state.supply_left, lower)
+        state.supply_cap = max(state.supply_cap, state.supply_used + lower)
+    elif name == "supply_used":
+        state.supply_used = max(state.supply_used, lower)
+        state.supply_left = max(0, state.supply_cap - state.supply_used)
+    elif name == "supply_cap":
+        state.supply_cap = max(state.supply_cap, lower)
+        state.supply_left = max(state.supply_left, state.supply_cap - state.supply_used)
+    elif name == "game_time":
+        state.game_time = max(state.game_time, condition.value)
+    elif name == "townhall_count":
+        state.townhalls = max(state.townhalls, lower)
+    elif name in {"structure_count", "structure_ready", "structure_pending"}:
+        _set_structure_floor(
+            state,
+            condition.target or "",
+            lower,
+            ready=name == "structure_ready",
+            pending=name == "structure_pending",
+        )
+    elif name == "idle_structure_count":
+        _set_structure_floor(state, condition.target or "", lower, ready=True)
+    elif name == "producer_available":
+        _set_producer_available_fact(state, condition.target, lower)
+    elif name == "upgrade_complete" and lower >= 1 and condition.target:
+        state.upgrades.add(condition.target)
+    elif name == "ability_available":
+        _set_ability_available_fact(state, condition, lower)
+    elif name == "unit_form_count":
+        actor = condition.actor
+        if not actor or actor == "any":
+            actors = {
+                canonical_runtime_actor_name(enum_name)
+                for enum_name in UNIT_FORM_SPECS.get(condition.target or "", ())
+            }
+            if len(actors) == 1:
+                actor = actors.pop()
+        _set_actor_floor(state, actor, lower)
+    elif name in {
+        "unit_count",
+        "unit_near_location",
+        "idle_unit_count",
+        "ready_unit_count",
+        "damaged_unit_count",
+        "cloaked_unit_count",
+        "flying_unit_count",
+        "loaded_unit_count",
+        "weapon_ready_count",
+    }:
+        _set_actor_floor(state, condition.target, lower)
+    elif name in {"unit_health", "unit_health_fraction", "unit_energy", "unit_order_count"}:
+        # These observations return None, rather than zero, when no subject
+        # exists. Any true comparison therefore guarantees one selected actor.
+        _set_actor_floor(state, condition.target, 1)
+    elif name == "cargo_used" and lower >= 1:
+        _set_actor_floor(state, condition.target, 1)
+
+
+_SELECTION_BOUNDED_COUNT_CONDITIONS = {
+    "structure_count",
+    "structure_ready",
+    "structure_pending",
+    "unit_count",
+    "townhall_count",
+    "enemy_unit_count",
+    "enemy_structure_count",
+    "idle_structure_count",
+    "producer_available",
+    "unit_near_location",
+    "enemy_near_location",
+    "under_attack",
+    "idle_unit_count",
+    "ready_unit_count",
+    "damaged_unit_count",
+    "cloaked_unit_count",
+    "flying_unit_count",
+    "loaded_unit_count",
+    "weapon_ready_count",
+    "ability_available",
+    "unit_form_count",
+}
+_BOOLEAN_CONDITIONS = {
+    "upgrade_complete",
+    "enemy_race",
+    "alert_active",
+    "location_visible",
+}
+
+
+def _selection_capacity(selection: object | None) -> int | None:
+    if selection is None:
+        return None
+    count = _selection_value(selection, "count", None)
+    tags = _selection_value(selection, "tags", ())
+    capacities: list[int] = []
+    if isinstance(count, int) and not isinstance(count, bool):
+        capacities.append(count)
+    if isinstance(tags, (tuple, list, set)) and tags:
+        capacities.append(len(tags))
+    return min(capacities) if capacities else None
+
+
+def _boolean_comparison_is_possible(comparison: str, expected: float) -> bool:
+    def matches(observed: float) -> bool:
+        if comparison == "gte":
+            return observed >= expected
+        if comparison == "lte":
+            return observed <= expected
+        if comparison == "eq":
+            return observed == expected
+        if comparison == "neq":
+            return observed != expected
+        if comparison == "gt":
+            return observed > expected
+        return observed < expected
+
+    return matches(0.0) or matches(1.0)
+
+
+def _validate_atomic_condition(
+    action: WaitUntilCommand | ConditionSpec, index: int, state: _PlanState
+) -> None:
+    condition = action.condition
+    value = (
+        action.value if isinstance(action, ConditionSpec) else action.at_least
+    )
+    comparison = action.comparison
+    if condition not in _SUPPORTED_WAIT_CONDITIONS:
         raise PlanValidationError(
-            f"action {index}: wait-until on_timeout must be replan or fail"
+            f"action {index}: unsupported condition: {condition}"
+        )
+    if comparison not in _SUPPORTED_COMPARISONS:
+        raise PlanValidationError(
+            f"action {index}: unsupported condition comparison: {comparison}"
+        )
+    if not math.isfinite(value):
+        raise PlanValidationError(f"action {index}: condition threshold must be finite")
+    if not 0 <= value <= 10000:
+        raise PlanValidationError(
+            f"action {index}: condition threshold must be between 0 and 10000"
+        )
+    if condition in _BOOLEAN_CONDITIONS and not _boolean_comparison_is_possible(
+        comparison, value
+    ):
+        raise PlanValidationError(
+            f"action {index}: boolean condition {condition} can only observe 0 or 1"
         )
     if not math.isfinite(action.radius) or not 0.5 <= action.radius <= 64:
         raise PlanValidationError(
-            f"action {index}: wait-until radius must be between 0.5 and 64"
+            f"action {index}: condition radius must be between 0.5 and 64"
         )
     _validate_selection(action.selection, index)
+    required_count = _integer_lower_bound(comparison, value)
+    selection_capacity = _selection_capacity(action.selection)
+    if (
+        condition in _SELECTION_BOUNDED_COUNT_CONDITIONS
+        and required_count is not None
+        and selection_capacity is not None
+        and required_count > selection_capacity
+    ):
+        raise PlanValidationError(
+            f"action {index}: condition requires {required_count} matches but "
+            f"selection can expose at most {selection_capacity}"
+        )
 
     needs_target = {
         "structure_count",
@@ -628,24 +1322,112 @@ def _validate_wait_until(
         "producer_available",
         "cargo_used",
         "unit_near_location",
+        "idle_unit_count",
+        "ready_unit_count",
+        "damaged_unit_count",
+        "cloaked_unit_count",
+        "flying_unit_count",
+        "loaded_unit_count",
+        "weapon_ready_count",
+        "unit_health",
+        "unit_health_fraction",
+        "unit_energy",
+        "unit_order_count",
+        "unit_form_count",
+        "enemy_race",
+        "alert_active",
     }
-    if action.condition in needs_target and not action.target:
+    if condition in needs_target and not action.target:
         raise PlanValidationError(
-            f"action {index}: wait-until {action.condition} requires a target"
+            f"action {index}: condition {condition} requires a target"
         )
-    if action.condition in {"unit_near_location", "enemy_near_location"}:
+    if condition == "ability_available":
+        ability = action.ability
+        actor = action.actor
+        if not ability or ability not in ABILITY_SPECS:
+            raise PlanValidationError(
+                f"action {index}: ability_available requires an allowlisted ability"
+            )
+        if not actor:
+            raise PlanValidationError(
+                f"action {index}: ability_available requires an actor"
+            )
+        if actor != "any":
+            _validate_actor_kind(actor, index, ability)
+        compatible_actors = ABILITY_SPECS[ability].actors
+        if actor != "any" and actor not in compatible_actors:
+            raise PlanValidationError(
+                f"action {index}: actor {actor} cannot issue ability {ability}"
+            )
+    elif condition == "enemy_race" and action.target not in ENEMY_RACE_KEYS:
+        raise PlanValidationError(
+            f"action {index}: enemy_race requires one of {', '.join(ENEMY_RACE_KEYS)}"
+        )
+    elif condition == "alert_active" and action.target not in ALERT_KEYS:
+        raise PlanValidationError(
+            f"action {index}: alert_active requires an allowlisted game alert"
+        )
+    elif action.ability is not None or action.actor is not None:
+        if condition != "unit_form_count" or action.ability is not None:
+            raise PlanValidationError(
+                f"action {index}: condition {condition} does not use ability/actor fields"
+            )
+    if condition == "unit_form_count":
+        form = action.target
+        if form is None or form not in UNIT_FORM_SPECS:
+            raise PlanValidationError(
+                f"action {index}: unsupported Terran runtime form: {form}"
+            )
+        actor = action.actor
+        if actor and actor != "any":
+            actor_forms = set(RUNTIME_ACTOR_UNIT_TYPES.get(actor, ()))
+            requested_forms = set(UNIT_FORM_SPECS[form])
+            if actor_forms.isdisjoint(requested_forms):
+                raise PlanValidationError(
+                    f"action {index}: form {action.target} is incompatible with actor {actor}"
+                )
+
+    if condition in {
+        "enemy_unit_count",
+        "enemy_structure_count",
+        "enemy_near_location",
+    } and action.target == "nearest_destructible":
+        raise PlanValidationError(
+            f"action {index}: enemy condition cannot use a neutral target selector"
+        )
+
+    location_conditions = {
+        "unit_near_location",
+        "enemy_near_location",
+        "location_visible",
+        "under_attack",
+    }
+    if condition in location_conditions:
         if action.location is None:
             raise PlanValidationError(
-                f"action {index}: wait-until {action.condition} requires a location"
+                f"action {index}: condition {condition} requires a location"
             )
-        _validate_location_or_point(action, index, state, action.condition, 0, 256)
+        _validate_location_or_point(action, index, state, condition, 0, 256)
     elif action.location is not None:
-        if action.condition != "under_attack":
-            raise PlanValidationError(
-                f"action {index}: wait-until {action.condition} does not use a location"
-            )
-        _validate_location_or_point(action, index, state, action.condition, 0, 256)
-    if not state.known:
+        raise PlanValidationError(
+            f"action {index}: condition {condition} does not use a location"
+        )
+
+
+def _validate_wait_until(
+    action: WaitUntilCommand, index: int, state: _PlanState
+) -> None:
+    if action.condition not in _SUPPORTED_WAIT_CONDITIONS:
+        raise PlanValidationError(
+            f"action {index}: unsupported wait-until condition: {action.condition}"
+        )
+    _validate_atomic_condition(action, index, state)
+    _validate_bounded_seconds(action.timeout_seconds, index, "wait-until timeout")
+    if action.on_timeout not in {"replan", "fail"}:
+        raise PlanValidationError(
+            f"action {index}: wait-until on_timeout must be replan or fail"
+        )
+    if not state.known or action.comparison != "gte":
         return
 
     threshold = int(math.ceil(action.at_least))
@@ -674,12 +1456,28 @@ def _validate_wait_until(
         "army_supply",
         "enemy_unit_count",
         "enemy_structure_count",
+        "enemy_race",
+        "alert_active",
         "idle_structure_count",
         "producer_available",
         "cargo_used",
         "unit_near_location",
         "enemy_near_location",
         "under_attack",
+        "idle_unit_count",
+        "ready_unit_count",
+        "damaged_unit_count",
+        "cloaked_unit_count",
+        "flying_unit_count",
+        "loaded_unit_count",
+        "weapon_ready_count",
+        "unit_health",
+        "unit_health_fraction",
+        "unit_energy",
+        "unit_order_count",
+        "ability_available",
+        "unit_form_count",
+        "location_visible",
     }:
         return
     if action.condition == "townhall_count":
@@ -932,6 +1730,22 @@ def _validate_production_policy(
             index,
             action_name,
         )
+
+
+def _validate_stop_production(
+    action: StopProductionCommand, index: int, state: _PlanState
+) -> None:
+    if action.unit is not None and action.unit not in UNIT_SPECS:
+        raise PlanValidationError(
+            f"action {index}: unsupported stop-production unit: {action.unit}"
+        )
+    if action.unit is None:
+        state.production_policies.clear()
+        state.production_targets.clear()
+        return
+    target_key = "worker" if action.unit == "scv" else action.unit
+    state.production_policies.pop(target_key, None)
+    state.production_targets.pop(target_key, None)
 
 
 def _materialize_production_target(
@@ -1632,6 +2446,10 @@ def _validate_ability_target_filter(
     target_key = normalize_name(str(target))
 
     if target_key in TARGET_SELECTORS:
+        if target_key == "nearest_destructible":
+            raise PlanValidationError(
+                f"action {index}: ability {ability_key} cannot target a neutral destructible"
+            )
         exact_target_filters = {
             "supply_depot",
             "worker",
@@ -1823,6 +2641,10 @@ def _validate_unit_target(action: object, index: int, ability_key: str) -> None:
         return
     target_key = normalize_name(str(target))
     if target_key in TARGET_SELECTORS:
+        if target_key == "nearest_destructible":
+            raise PlanValidationError(
+                f"action {index}: ability {ability_key} cannot target a neutral destructible"
+            )
         return
     if target_key == "worker":
         return

@@ -8,10 +8,18 @@ from typing import Any, Union
 from starcraft_llm.command_catalog import (
     ABILITY_SPECS,
     ADDON_SPECS,
+    ALERT_KEYS,
     ATTACK_CAPABLE_UNIT_KEYS,
+    ENEMY_RACE_KEYS,
     FLYING_STRUCTURE_ACTOR_KEYS,
     LOCATION_SPECS,
+    MAX_CONDITION_TERMS,
+    MAX_CONTROL_BRANCH_ACTIONS,
+    MAX_CONTROL_DEPTH,
+    MAX_CONTROL_EXECUTION_ACTIONS,
+    MAX_CONTROL_TOTAL_ACTIONS,
     MAX_POLICY_SECONDS,
+    MAX_REPEAT_CYCLES,
     MAX_SELECTION_COUNT,
     MAX_STRUCTURE_ACTION_COUNT,
     MAX_WORKER_ASSIGNMENT_COUNT,
@@ -22,6 +30,7 @@ from starcraft_llm.command_catalog import (
     STRUCTURE_SPECS,
     TARGET_SELECTORS,
     TRANSFORM_ABILITY_KEYS,
+    UNIT_FORM_SPECS,
     UNIT_SPECS,
     UPGRADE_SPECS,
     normalize_name,
@@ -81,13 +90,14 @@ class AttackMoveCommand:
 
 @dataclass(frozen=True)
 class AttackEnemyCommand:
-    """Attack the nearest or a specific visible enemy with one logical unit group."""
+    """Attack a visible enemy or neutral destructible with one logical unit group."""
 
     unit: str = "marine"
     selection: SelectionSpec | None = None
     queued: bool = False
     target_unit: str | None = None
     target_tag: int | None = None
+    target_alliance: str = "enemy"
     wait_for_target_death: bool = False
     timeout_seconds: float = 60.0
 
@@ -105,6 +115,21 @@ class KiteCommand:
 
 
 @dataclass(frozen=True)
+class AttackUntilClearCommand:
+    """Clear an observed area and require a stable, bounded clear confirmation."""
+
+    unit: str
+    location: LocationRef
+    target_unit: str | None = None
+    selection: SelectionSpec | None = None
+    radius: float = 16.0
+    arrival_tolerance: float = 5.0
+    clear_seconds: float = 2.0
+    timeout_seconds: float = 180.0
+    on_timeout: str = "replan"
+
+
+@dataclass(frozen=True)
 class WaitCommand:
     """Pause strategy execution for a small amount of game-clock time."""
 
@@ -117,12 +142,41 @@ class WaitUntilCommand:
 
     condition: str
     at_least: float
+    comparison: str = "gte"
     target: str | None = None
+    ability: str | None = None
+    actor: str | None = None
     location: LocationRef | None = None
     radius: float = 12.0
     selection: SelectionSpec | None = None
     timeout_seconds: float = 120.0
     on_timeout: str = "replan"
+
+
+@dataclass(frozen=True)
+class ConditionSpec:
+    """One comparator-based runtime observation used by control flow."""
+
+    condition: str
+    value: float = 1.0
+    comparison: str = "gte"
+    target: str | None = None
+    ability: str | None = None
+    actor: str | None = None
+    location: LocationRef | None = None
+    radius: float = 12.0
+    selection: SelectionSpec | None = None
+
+
+@dataclass(frozen=True)
+class ConditionGroup:
+    """A bounded all/any group of atomic condition observations."""
+
+    match: str
+    conditions: tuple[ConditionSpec, ...]
+
+
+ConditionExpression = Union[ConditionSpec, ConditionGroup]
 
 
 @dataclass(frozen=True)
@@ -179,6 +233,13 @@ class ProductionPolicyCommand:
     reserve_vespene: int = 0
     reserve_supply: int = 0
     max_seconds: float = 300.0
+
+
+@dataclass(frozen=True)
+class StopProductionCommand:
+    """Stop one or every registered background production policy."""
+
+    unit: str | None = None
 
 
 @dataclass(frozen=True)
@@ -404,11 +465,41 @@ class ReplanCommand:
     reason: str = "requested"
 
 
+@dataclass(frozen=True)
+class ConditionalCommand:
+    """Choose one validated branch from a bounded runtime condition expression."""
+
+    when: ConditionExpression
+    then_actions: tuple["StrategyAction", ...]
+    else_actions: tuple["StrategyAction", ...] = ()
+
+
+@dataclass(frozen=True)
+class RepeatCommand:
+    """Repeat a validated body for fixed cycles or until a condition is met."""
+
+    actions: tuple["StrategyAction", ...]
+    max_cycles: int
+    until: ConditionExpression | None = None
+    max_seconds: float = 300.0
+    on_exhausted: str = "replan"
+
+
+@dataclass(frozen=True)
+class WithTimeoutCommand:
+    """Run a nested sequence under one outer game-clock deadline."""
+
+    actions: tuple["StrategyAction", ...]
+    timeout_seconds: float = 120.0
+    on_timeout: str = "replan"
+
+
 StrategyAction = Union[
     MoveCommand,
     AttackMoveCommand,
     AttackEnemyCommand,
     KiteCommand,
+    AttackUntilClearCommand,
     PatrolCommand,
     HoldPositionCommand,
     StopCommand,
@@ -421,6 +512,7 @@ StrategyAction = Union[
     DistributeWorkersCommand,
     TrainUnitCommand,
     ProductionPolicyCommand,
+    StopProductionCommand,
     BuildStructureCommand,
     ExpandCommand,
     BuildAddonCommand,
@@ -441,6 +533,9 @@ StrategyAction = Union[
     BuildNukeCommand,
     LaunchNukeCommand,
     ReplanCommand,
+    ConditionalCommand,
+    RepeatCommand,
+    WithTimeoutCommand,
 ]
 
 
@@ -737,12 +832,25 @@ def strategy_plan_from_dict(payload: Any, default_unit: str = "worker") -> Strat
     if not isinstance(actions_payload, list) or not actions_payload:
         raise StrategyParseError("strategy JSON 'actions' must be a non-empty array")
 
-    return StrategyPlan(
+    plan = StrategyPlan(
         actions=tuple(
-            _action_from_dict(action, default_unit=default_unit)
+            _action_from_dict(action, default_unit=default_unit, control_depth=0)
             for action in actions_payload
         )
     )
+    defined_actions = _defined_action_count(plan.actions)
+    if defined_actions > MAX_CONTROL_TOTAL_ACTIONS:
+        raise StrategyParseError(
+            "strategy JSON defines too many top-level/nested actions: "
+            f"{defined_actions} > {MAX_CONTROL_TOTAL_ACTIONS}"
+        )
+    execution_actions = _maximum_execution_action_count(plan.actions)
+    if execution_actions > MAX_CONTROL_EXECUTION_ACTIONS:
+        raise StrategyParseError(
+            "strategy JSON expands to too many bounded runtime actions: "
+            f"{execution_actions} > {MAX_CONTROL_EXECUTION_ACTIONS}"
+        )
+    return plan
 
 
 def strategy_plan_to_dict(plan: StrategyPlan) -> dict[str, list[dict[str, object]]]:
@@ -1027,6 +1135,26 @@ def _parse_wait_until(parts: list[str]) -> WaitUntilCommand:
             raise StrategyParseError("use: wait until game_time 120")
         return WaitUntilCommand(
             condition="game_time", at_least=_parse_at_least(parts[1])
+        )
+
+    if metric in {"enemy_race", "race", "matchup"}:
+        if len(parts) != 2:
+            raise StrategyParseError("use: wait until enemy_race zerg")
+        return WaitUntilCommand(
+            condition="enemy_race",
+            target=normalize_enemy_race(parts[1]),
+            at_least=1,
+        )
+
+    if metric in {"alert", "alert_active"}:
+        if len(parts) < 2:
+            raise StrategyParseError(
+                "use: wait until alert nuclear_launch_detected"
+            )
+        return WaitUntilCommand(
+            condition="alert_active",
+            target=normalize_alert(" ".join(parts[1:])),
+            at_least=1,
         )
 
     raise StrategyParseError(f"unsupported wait-until condition: {parts[0]}")
@@ -1360,11 +1488,124 @@ def _ability_in_family(ability: str, family: set[str] | frozenset[str]) -> bool:
     return ability in family
 
 
-def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
+def _action_from_dict(
+    payload: Any, default_unit: str, control_depth: int = 0
+) -> StrategyAction:
     if not isinstance(payload, dict):
         raise StrategyParseError("each strategy JSON action must be an object")
 
     action_type = str(payload.get("type", "")).strip().lower()
+    if action_type in {"conditional", "if"}:
+        when_payload = payload.get("when", payload.get("condition"))
+        if when_payload is None:
+            raise StrategyParseError("conditional requires a 'when' condition")
+        then_payload = payload.get("then_actions", payload.get("then"))
+        else_payload = payload.get(
+            "else_actions", payload.get("otherwise", payload.get("else", []))
+        )
+        return ConditionalCommand(
+            when=_condition_expression_from_payload(when_payload),
+            then_actions=_nested_actions_from_payload(
+                then_payload,
+                "conditional then_actions",
+                default_unit,
+                control_depth,
+                allow_empty=False,
+            ),
+            else_actions=_nested_actions_from_payload(
+                else_payload,
+                "conditional else_actions",
+                default_unit,
+                control_depth,
+                allow_empty=True,
+            ),
+        )
+
+    if action_type in {"repeat", "repeat_until", "repeat-until"}:
+        actions = _nested_actions_from_payload(
+            payload.get("actions"),
+            f"{action_type} actions",
+            default_unit,
+            control_depth,
+            allow_empty=False,
+        )
+        if action_type == "repeat":
+            cycles = _positive_int_from_payload(
+                payload,
+                "cycles",
+                default=1,
+                max_count=MAX_REPEAT_CYCLES,
+            )
+            on_exhausted = normalize_name(
+                str(payload.get("on_exhausted", "replan"))
+            )
+            if on_exhausted not in {"replan", "fail"}:
+                raise StrategyParseError(
+                    "fixed repeat on_exhausted must be 'replan' or 'fail'"
+                )
+            return RepeatCommand(
+                actions=actions,
+                max_cycles=cycles,
+                until=None,
+                max_seconds=_bounded_number_from_payload(
+                    payload,
+                    "max_seconds",
+                    default=MAX_POLICY_SECONDS,
+                    minimum=1,
+                    maximum=MAX_POLICY_SECONDS,
+                ),
+                on_exhausted=on_exhausted,
+            )
+        until_payload = payload.get("until", payload.get("condition"))
+        if until_payload is None:
+            raise StrategyParseError("repeat_until requires an 'until' condition")
+        on_exhausted = normalize_name(str(payload.get("on_exhausted", "replan")))
+        if on_exhausted not in {"replan", "fail", "continue"}:
+            raise StrategyParseError(
+                "repeat-until on_exhausted must be 'replan', 'fail', or 'continue'"
+            )
+        return RepeatCommand(
+            actions=actions,
+            max_cycles=_positive_int_from_payload(
+                payload,
+                "max_cycles",
+                default=20,
+                max_count=MAX_REPEAT_CYCLES,
+            ),
+            until=_condition_expression_from_payload(until_payload),
+            max_seconds=_bounded_number_from_payload(
+                payload,
+                "max_seconds",
+                default=300,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
+            ),
+            on_exhausted=on_exhausted,
+        )
+
+    if action_type in {"with_timeout", "with-timeout"}:
+        on_timeout = normalize_name(str(payload.get("on_timeout", "replan")))
+        if on_timeout not in {"replan", "fail"}:
+            raise StrategyParseError(
+                "with-timeout on_timeout must be 'replan' or 'fail'"
+            )
+        return WithTimeoutCommand(
+            actions=_nested_actions_from_payload(
+                payload.get("actions"),
+                "with-timeout actions",
+                default_unit,
+                control_depth,
+                allow_empty=False,
+            ),
+            timeout_seconds=_bounded_number_from_payload(
+                payload,
+                "timeout_seconds",
+                default=120,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
+            ),
+            on_timeout=on_timeout,
+        )
     if action_type in {
         "move",
         "move_target",
@@ -1420,6 +1661,51 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             ),
         )
 
+    if action_type in {"attack_until_clear", "attack-until-clear"}:
+        x, y, location = _point_target_from_payload(payload)
+        resolved_location = location or LocationRef(x=x, y=y)
+        target_value = payload.get("target_unit", payload.get("target"))
+        on_timeout = normalize_name(str(payload.get("on_timeout", "replan")))
+        if on_timeout not in {"replan", "fail"}:
+            raise StrategyParseError(
+                "attack-until-clear on_timeout must be 'replan' or 'fail'"
+            )
+        return AttackUntilClearCommand(
+            unit=normalize_mobile_attack_unit(str(payload.get("unit", "marine"))),
+            location=resolved_location,
+            target_unit=(
+                normalize_enemy_target(str(target_value))
+                if target_value is not None
+                else None
+            ),
+            selection=_selection_from_payload(payload),
+            radius=_bounded_number_from_payload(
+                payload, "radius", default=16, minimum=1, maximum=64
+            ),
+            arrival_tolerance=_bounded_number_from_payload(
+                payload,
+                "arrival_tolerance",
+                default=5,
+                minimum=0.5,
+                maximum=20,
+            ),
+            clear_seconds=_bounded_number_from_payload(
+                payload,
+                "clear_seconds",
+                default=2,
+                minimum=0.25,
+                maximum=30,
+            ),
+            timeout_seconds=_bounded_number_from_payload(
+                payload,
+                "timeout_seconds",
+                default=180,
+                minimum=1,
+                maximum=MAX_POLICY_SECONDS,
+            ),
+            on_timeout=on_timeout,
+        )
+
     if action_type in {"attack", "attack_move", "attack-move"}:
         target = str(payload.get("target", "")).strip().lower()
         if target in {"enemy", "nearest_enemy", "nearest enemy"} or any(
@@ -1431,6 +1717,7 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
                 queued=_bool_from_payload(payload, "queued", default=False),
                 target_unit=_optional_attack_target_from_payload(payload),
                 target_tag=_optional_tag_from_payload(payload, "target_tag"),
+                target_alliance=_attack_target_alliance_from_payload(payload),
             )
         unit = normalize_unit(str(payload.get("unit", default_unit)))
         x, y, location = _point_target_from_payload(payload)
@@ -1453,6 +1740,9 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
     }:
         target_unit = _optional_attack_target_from_payload(payload)
         target_tag = _optional_tag_from_payload(payload, "target_tag")
+        target_alliance = _attack_target_alliance_from_payload(payload)
+        if action_type in {"attack_enemy", "attack-enemy"} and target_alliance != "enemy":
+            raise StrategyParseError("attack_enemy only supports enemy targets")
         if (
             action_type
             in {"attack_target", "attack-target", "focus_fire", "focus-fire"}
@@ -1466,6 +1756,7 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
             queued=_bool_from_payload(payload, "queued", default=False),
             target_unit=target_unit,
             target_tag=target_tag,
+            target_alliance=target_alliance,
             wait_for_target_death=action_type in {"focus_fire", "focus-fire"},
             timeout_seconds=_bounded_number_from_payload(
                 payload,
@@ -1559,6 +1850,30 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
 
     if action_type in {"wait_until", "wait-until"}:
         return _wait_until_from_dict(payload)
+
+    if action_type in {"wait_for_ability", "wait-for-ability"}:
+        translated = dict(payload)
+        translated["condition"] = "ability_available"
+        translated["at_least"] = payload.get("count", payload.get("at_least", 1))
+        translated.pop("count", None)
+        return _wait_until_from_dict(translated)
+
+    if action_type in {"wait_for_form", "wait-for-form"}:
+        translated = dict(payload)
+        translated["condition"] = "unit_form_count"
+        translated["target"] = payload.get("form", payload.get("target"))
+        translated["actor"] = payload.get("unit", payload.get("actor"))
+        translated["at_least"] = payload.get("count", payload.get("at_least", 1))
+        translated.pop("count", None)
+        return _wait_until_from_dict(translated)
+
+    if action_type in {"wait_for_idle", "wait-for-idle"}:
+        translated = dict(payload)
+        translated["condition"] = "idle_unit_count"
+        translated["target"] = payload.get("unit", payload.get("target"))
+        translated["at_least"] = payload.get("count", payload.get("at_least", 1))
+        translated.pop("count", None)
+        return _wait_until_from_dict(translated)
 
     if action_type in {"gather", "gather_minerals"}:
         resource = str(payload.get("resource", "minerals")).strip().lower()
@@ -1668,6 +1983,16 @@ def _action_from_dict(payload: Any, default_unit: str) -> StrategyAction:
                 minimum=1,
                 maximum=MAX_POLICY_SECONDS,
             ),
+        )
+
+    if action_type in {"stop_production", "stop-production"}:
+        unit_value = payload.get("unit")
+        return StopProductionCommand(
+            unit=(
+                normalize_train_unit(str(unit_value))
+                if unit_value is not None
+                else None
+            )
         )
 
     if action_type == "build":
@@ -2066,8 +2391,33 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
             payload["target_unit"] = action.target_unit
         if action.target_tag is not None:
             payload["target_tag"] = action.target_tag
+        if action.target_alliance != "enemy":
+            payload["target_alliance"] = action.target_alliance
         if action.wait_for_target_death and action.timeout_seconds != 60:
             payload["timeout_seconds"] = action.timeout_seconds
+        return payload
+    if isinstance(action, AttackUntilClearCommand):
+        payload = _point_command_payload(
+            "attack_until_clear",
+            action.unit,
+            action.location.x,
+            action.location.y,
+            action.location,
+            action.selection,
+            False,
+        )
+        if action.target_unit is not None:
+            payload["target_unit"] = action.target_unit
+        if action.radius != 16:
+            payload["radius"] = action.radius
+        if action.arrival_tolerance != 5:
+            payload["arrival_tolerance"] = action.arrival_tolerance
+        if action.clear_seconds != 2:
+            payload["clear_seconds"] = action.clear_seconds
+        if action.timeout_seconds != 180:
+            payload["timeout_seconds"] = action.timeout_seconds
+        if action.on_timeout != "replan":
+            payload["on_timeout"] = action.on_timeout
         return payload
     if isinstance(action, KiteCommand):
         payload = _unit_command_payload("kite", action.unit, action.selection, False)
@@ -2123,10 +2473,16 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         wait_payload: dict[str, object] = {
             "type": "wait_until",
             "condition": action.condition,
-            "at_least": action.at_least,
         }
+        wait_payload.update(
+            _comparison_threshold_payload(action.comparison, action.at_least)
+        )
         if action.target is not None:
             wait_payload["target"] = action.target
+        if action.ability is not None:
+            wait_payload["ability"] = action.ability
+        if action.actor is not None:
+            wait_payload["actor"] = action.actor
         if action.location is not None:
             wait_payload.update(_location_to_payload(action.location))
         if action.radius != 12:
@@ -2203,6 +2559,11 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
         if action.max_seconds != 300:
             policy_payload["max_seconds"] = action.max_seconds
         return policy_payload
+    if isinstance(action, StopProductionCommand):
+        stop_policy_payload: dict[str, object] = {"type": "stop_production"}
+        if action.unit is not None:
+            stop_policy_payload["unit"] = action.unit
+        return stop_policy_payload
     if isinstance(action, BuildStructureCommand):
         build_payload: dict[str, object] = {
             "type": "build",
@@ -2392,6 +2753,52 @@ def _action_to_dict(action: StrategyAction) -> dict[str, object]:
             action.selection,
             action.queued,
         )
+    if isinstance(action, ConditionalCommand):
+        conditional_payload: dict[str, object] = {
+            "type": "conditional",
+            "when": _condition_expression_to_payload(action.when),
+            "then_actions": [
+                _action_to_dict(child) for child in action.then_actions
+            ],
+        }
+        if action.else_actions:
+            conditional_payload["else_actions"] = [
+                _action_to_dict(child) for child in action.else_actions
+            ]
+        return conditional_payload
+    if isinstance(action, RepeatCommand):
+        if action.until is None:
+            payload = {
+                "type": "repeat",
+                "cycles": action.max_cycles,
+                "actions": [_action_to_dict(child) for child in action.actions],
+            }
+            if action.max_seconds != MAX_POLICY_SECONDS:
+                payload["max_seconds"] = action.max_seconds
+            if action.on_exhausted != "replan":
+                payload["on_exhausted"] = action.on_exhausted
+            return payload
+        payload = {
+            "type": "repeat_until",
+            "until": _condition_expression_to_payload(action.until),
+            "actions": [_action_to_dict(child) for child in action.actions],
+            "max_cycles": action.max_cycles,
+        }
+        if action.max_seconds != 300:
+            payload["max_seconds"] = action.max_seconds
+        if action.on_exhausted != "replan":
+            payload["on_exhausted"] = action.on_exhausted
+        return payload
+    if isinstance(action, WithTimeoutCommand):
+        timeout_payload: dict[str, object] = {
+            "type": "with_timeout",
+            "actions": [_action_to_dict(child) for child in action.actions],
+        }
+        if action.timeout_seconds != 120:
+            timeout_payload["timeout_seconds"] = action.timeout_seconds
+        if action.on_timeout != "replan":
+            timeout_payload["on_timeout"] = action.on_timeout
+        return timeout_payload
     if isinstance(action, ReplanCommand):
         return {"type": "replan", "reason": action.reason}
     raise TypeError(f"unsupported strategy action: {action!r}")
@@ -2448,6 +2855,52 @@ def _selection_to_payload(selection: SelectionSpec) -> dict[str, object]:
     if selection.tags:
         selection_payload["tags"] = list(selection.tags)
     return selection_payload
+
+
+def _comparison_threshold_payload(
+    comparison: str, value: float
+) -> dict[str, object]:
+    if comparison == "gte":
+        return {"at_least": value}
+    if comparison == "lte":
+        return {"at_most": value}
+    if comparison == "eq":
+        return {"equals": value}
+    return {"comparison": comparison, "value": value}
+
+
+def _condition_expression_to_payload(
+    expression: ConditionExpression,
+) -> dict[str, object]:
+    if isinstance(expression, ConditionGroup):
+        return {
+            "match": expression.match,
+            "conditions": [
+                _condition_spec_to_payload(condition)
+                for condition in expression.conditions
+            ],
+        }
+    return _condition_spec_to_payload(expression)
+
+
+def _condition_spec_to_payload(condition: ConditionSpec) -> dict[str, object]:
+    payload: dict[str, object] = {"condition": condition.condition}
+    payload.update(
+        _comparison_threshold_payload(condition.comparison, condition.value)
+    )
+    if condition.target is not None:
+        payload["target"] = condition.target
+    if condition.ability is not None:
+        payload["ability"] = condition.ability
+    if condition.actor is not None:
+        payload["actor"] = condition.actor
+    if condition.location is not None:
+        payload.update(_location_to_payload(condition.location))
+    if condition.radius != 12:
+        payload["radius"] = condition.radius
+    if condition.selection is not None:
+        payload["selection"] = _selection_to_payload(condition.selection)
+    return payload
 
 
 def _public_mode_for_ability(ability: str) -> str:
@@ -2624,6 +3077,13 @@ def _optional_attack_target_from_payload(payload: dict[str, Any]) -> str | None:
         return None
     text = str(value).strip()
     return normalize_enemy_target(text) if text else None
+
+
+def _attack_target_alliance_from_payload(payload: dict[str, Any]) -> str:
+    alliance = normalize_name(str(payload.get("target_alliance", "enemy")))
+    if alliance not in {"enemy", "neutral"}:
+        raise StrategyParseError("target_alliance must be 'enemy' or 'neutral'")
+    return alliance
 
 
 def _optional_rally_target_from_payload(payload: dict[str, Any]) -> str | None:
@@ -2888,48 +3348,20 @@ def _optional_positive_int_from_payload(
 
 def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
     condition = normalize_wait_condition(str(payload.get("condition", "")))
-    at_least = _optional_number(
-        payload, ("at_least", "count", "value", "minimum"), default=1
+    comparison, threshold = _comparison_and_value_from_payload(payload)
+    target, ability, actor, location = _condition_fields_from_payload(
+        condition, payload
     )
-    if at_least < 0:
-        raise StrategyParseError("wait-until threshold must not be negative")
-
-    target: str | None = None
-    if condition.startswith("structure_") or condition == "idle_structure_count":
-        target_value = payload.get(
-            "target", payload.get("structure", payload.get("building", ""))
-        )
-        target = normalize_structure_target(str(target_value))
-    elif condition in {"unit_count", "unit_near_location"}:
-        target_value = payload.get("target", payload.get("unit", ""))
-        target = normalize_wait_unit(str(target_value))
-    elif condition == "producer_available":
-        target_value = payload.get("target", payload.get("unit", ""))
-        target = normalize_train_unit(str(target_value))
-    elif condition == "cargo_used":
-        target_value = payload.get("target", payload.get("actor", ""))
-        target = normalize_ability_actor(str(target_value))
-    elif condition == "enemy_near_location":
-        target_value = payload.get("target", payload.get("target_unit"))
-        target = (
-            normalize_enemy_target(str(target_value))
-            if target_value is not None
-            else None
-        )
-    elif condition == "upgrade_complete":
-        target_value = payload.get("target", payload.get("upgrade", ""))
-        target = normalize_upgrade(str(target_value))
-    needs_location = condition in {"unit_near_location", "enemy_near_location"}
-    location = _location_from_payload(payload, required=needs_location)
-    if condition == "under_attack" and location is None:
-        location = LocationRef(semantic="own_main")
     on_timeout = normalize_name(str(payload.get("on_timeout", "replan")))
     if on_timeout not in {"replan", "fail"}:
         raise StrategyParseError("wait-until on_timeout must be 'replan' or 'fail'")
     return WaitUntilCommand(
         condition=condition,
         target=target,
-        at_least=at_least,
+        ability=ability,
+        actor=actor,
+        at_least=threshold,
+        comparison=comparison,
         location=location,
         radius=_bounded_number_from_payload(
             payload, "radius", default=12, minimum=0.5, maximum=64
@@ -2944,6 +3376,266 @@ def _wait_until_from_dict(payload: dict[str, Any]) -> WaitUntilCommand:
         ),
         on_timeout=on_timeout,
     )
+
+
+def _condition_expression_from_payload(payload: Any) -> ConditionExpression:
+    if not isinstance(payload, dict):
+        raise StrategyParseError("condition expression must be an object")
+
+    match_value = payload.get("match")
+    conditions_value = payload.get("conditions")
+    if match_value is None:
+        for shorthand in ("all", "any"):
+            if shorthand in payload:
+                match_value = shorthand
+                conditions_value = payload[shorthand]
+                break
+    if match_value is not None or conditions_value is not None:
+        match = normalize_name(str(match_value or ""))
+        if match not in {"all", "any"}:
+            raise StrategyParseError("condition group match must be 'all' or 'any'")
+        if not isinstance(conditions_value, list) or not conditions_value:
+            raise StrategyParseError(
+                "condition group conditions must be a non-empty array"
+            )
+        if len(conditions_value) > MAX_CONDITION_TERMS:
+            raise StrategyParseError(
+                "condition group has too many terms: "
+                f"{len(conditions_value)} > {MAX_CONDITION_TERMS}"
+            )
+        conditions = []
+        for item in conditions_value:
+            if not isinstance(item, dict):
+                raise StrategyParseError("each condition group term must be an object")
+            if any(key in item for key in ("match", "conditions", "all", "any")):
+                raise StrategyParseError(
+                    "condition groups may contain atomic conditions only"
+                )
+            conditions.append(_condition_spec_from_payload(item))
+        return ConditionGroup(match=match, conditions=tuple(conditions))
+    return _condition_spec_from_payload(payload)
+
+
+def _condition_spec_from_payload(payload: dict[str, Any]) -> ConditionSpec:
+    condition = normalize_wait_condition(str(payload.get("condition", "")))
+    comparison, value = _comparison_and_value_from_payload(payload)
+    target, ability, actor, location = _condition_fields_from_payload(
+        condition, payload
+    )
+    return ConditionSpec(
+        condition=condition,
+        value=value,
+        comparison=comparison,
+        target=target,
+        ability=ability,
+        actor=actor,
+        location=location,
+        radius=_bounded_number_from_payload(
+            payload, "radius", default=12, minimum=0.5, maximum=64
+        ),
+        selection=_selection_from_payload(payload),
+    )
+
+
+def _comparison_and_value_from_payload(
+    payload: dict[str, Any],
+) -> tuple[str, float]:
+    threshold_fields = [
+        key
+        for key in ("at_least", "at_most", "equals", "value", "minimum", "count")
+        if key in payload and payload[key] is not None
+    ]
+    if len(threshold_fields) > 1:
+        raise StrategyParseError(
+            "condition must use exactly one threshold field: "
+            "at_least, at_most, equals, or value"
+        )
+    field_name = threshold_fields[0] if threshold_fields else None
+    inferred_comparison = {
+        "at_least": "gte",
+        "minimum": "gte",
+        "count": "gte",
+        "at_most": "lte",
+        "equals": "eq",
+    }.get(field_name or "", "gte")
+    comparison_value = payload.get("comparison", payload.get("operator"))
+    comparison = (
+        normalize_comparison(str(comparison_value))
+        if comparison_value is not None
+        else inferred_comparison
+    )
+    if (
+        comparison_value is not None
+        and field_name in {"at_least", "minimum", "count", "at_most", "equals"}
+        and comparison != inferred_comparison
+    ):
+        raise StrategyParseError(
+            f"condition threshold {field_name} conflicts with comparison {comparison}"
+        )
+    value = _optional_number(
+        payload,
+        (field_name,) if field_name is not None else (),
+        default=1,
+    )
+    if value < 0:
+        raise StrategyParseError("condition threshold must not be negative")
+    if value > 10000:
+        raise StrategyParseError("condition threshold must not exceed 10000")
+    return comparison, value
+
+
+def _condition_fields_from_payload(
+    condition: str, payload: dict[str, Any]
+) -> tuple[str | None, str | None, str | None, LocationRef | None]:
+    target: str | None = None
+    ability: str | None = None
+    actor: str | None = None
+
+    if condition.startswith("structure_") or condition == "idle_structure_count":
+        target_value = payload.get(
+            "target", payload.get("structure", payload.get("building", ""))
+        )
+        target = normalize_structure_target(str(target_value))
+    elif condition in {
+        "unit_count",
+        "unit_near_location",
+        "idle_unit_count",
+        "ready_unit_count",
+        "damaged_unit_count",
+        "cloaked_unit_count",
+        "flying_unit_count",
+        "loaded_unit_count",
+        "weapon_ready_count",
+        "unit_health",
+        "unit_health_fraction",
+        "unit_energy",
+        "unit_order_count",
+    }:
+        target_value = payload.get("target", payload.get("unit", ""))
+        target = normalize_condition_actor(str(target_value))
+    elif condition == "unit_form_count":
+        target_value = payload.get("target", payload.get("form", ""))
+        target = normalize_unit_form(str(target_value))
+        actor_value = payload.get("actor", payload.get("unit"))
+        actor = (
+            normalize_ability_actor(str(actor_value))
+            if actor_value is not None
+            else None
+        )
+    elif condition == "ability_available":
+        ability_value = payload.get("ability", payload.get("target", ""))
+        ability = normalize_ability(str(ability_value))
+        actor_value = payload.get("actor", payload.get("unit"))
+        actor = (
+            normalize_ability_actor(str(actor_value))
+            if actor_value is not None
+            else ABILITY_SPECS[ability].actors[0]
+        )
+    elif condition == "producer_available":
+        target_value = payload.get("target", payload.get("unit", ""))
+        target = normalize_train_unit(str(target_value))
+    elif condition == "cargo_used":
+        target_value = payload.get("target", payload.get("actor", ""))
+        target = normalize_ability_actor(str(target_value))
+    elif condition in {"enemy_unit_count", "enemy_structure_count", "enemy_near_location"}:
+        target_value = payload.get("target", payload.get("target_unit"))
+        target = (
+            normalize_enemy_target(str(target_value))
+            if target_value is not None
+            else None
+        )
+    elif condition == "enemy_race":
+        target_value = payload.get("target", payload.get("race", ""))
+        target = normalize_enemy_race(str(target_value))
+    elif condition == "alert_active":
+        target_value = payload.get("target", payload.get("alert", ""))
+        target = normalize_alert(str(target_value))
+    elif condition == "upgrade_complete":
+        target_value = payload.get("target", payload.get("upgrade", ""))
+        target = normalize_upgrade(str(target_value))
+
+    needs_location = condition in {
+        "unit_near_location",
+        "enemy_near_location",
+        "location_visible",
+    }
+    location = _location_from_payload(payload, required=needs_location)
+    if condition == "under_attack" and location is None:
+        location = LocationRef(semantic="own_main")
+    return target, ability, actor, location
+
+
+def _nested_actions_from_payload(
+    payload: Any,
+    field_name: str,
+    default_unit: str,
+    control_depth: int,
+    *,
+    allow_empty: bool,
+) -> tuple[StrategyAction, ...]:
+    if control_depth >= MAX_CONTROL_DEPTH:
+        raise StrategyParseError(
+            f"control-flow nesting exceeds maximum depth {MAX_CONTROL_DEPTH}"
+        )
+    if payload is None and allow_empty:
+        return ()
+    if not isinstance(payload, list) or (not payload and not allow_empty):
+        requirement = "an array" if allow_empty else "a non-empty array"
+        raise StrategyParseError(f"{field_name} must be {requirement}")
+    if len(payload) > MAX_CONTROL_BRANCH_ACTIONS:
+        raise StrategyParseError(
+            f"{field_name} has too many actions: "
+            f"{len(payload)} > {MAX_CONTROL_BRANCH_ACTIONS}"
+        )
+    return tuple(
+        _action_from_dict(
+            action,
+            default_unit=default_unit,
+            control_depth=control_depth + 1,
+        )
+        for action in payload
+    )
+
+
+def _defined_action_count(actions: tuple[StrategyAction, ...]) -> int:
+    total = 0
+    for action in actions:
+        total += 1
+        if isinstance(action, ConditionalCommand):
+            total += _defined_action_count(action.then_actions)
+            total += _defined_action_count(action.else_actions)
+        elif isinstance(action, RepeatCommand):
+            total += _defined_action_count(action.actions)
+        elif isinstance(action, WithTimeoutCommand):
+            total += _defined_action_count(action.actions)
+    return total
+
+
+def _maximum_execution_action_count(actions: tuple[StrategyAction, ...]) -> int:
+    """Return the conservative maximum number of action dispatches.
+
+    A conditional executes only one branch, while a repeat can execute its body
+    ``max_cycles`` times.  Counting each loop boundary as a dispatch mirrors the
+    runtime splicing implementation and prevents finite-but-explosive nesting.
+    """
+
+    total = 0
+    for action in actions:
+        if isinstance(action, ConditionalCommand):
+            total += 1 + max(
+                _maximum_execution_action_count(action.then_actions),
+                _maximum_execution_action_count(action.else_actions),
+            )
+        elif isinstance(action, RepeatCommand):
+            body = _maximum_execution_action_count(action.actions)
+            total += 1 + action.max_cycles * (body + 1)
+        elif isinstance(action, WithTimeoutCommand):
+            total += 2 + _maximum_execution_action_count(action.actions)
+        else:
+            total += 1
+        if total > MAX_CONTROL_EXECUTION_ACTIONS:
+            return total
+    return total
 
 
 def _looks_like_json(text: str) -> bool:
@@ -3028,8 +3720,35 @@ def normalize_wait_condition(condition: str) -> str:
         "enemy_seen": "enemy_unit_count",
         "enemy_count": "enemy_unit_count",
         "enemy_unit_count": "enemy_unit_count",
+        "enemy_unit_type_count": "enemy_unit_count",
         "enemy_structure_count": "enemy_structure_count",
+        "enemy_structure_type_count": "enemy_structure_count",
+        "enemy_race": "enemy_race",
+        "race": "enemy_race",
+        "matchup": "enemy_race",
+        "alert": "alert_active",
+        "alert_active": "alert_active",
         "idle_structure_count": "idle_structure_count",
+        "idle_unit_count": "idle_unit_count",
+        "unit_idle_count": "idle_unit_count",
+        "ready_unit_count": "ready_unit_count",
+        "damaged_unit_count": "damaged_unit_count",
+        "cloaked_unit_count": "cloaked_unit_count",
+        "flying_unit_count": "flying_unit_count",
+        "loaded_unit_count": "loaded_unit_count",
+        "weapon_ready_count": "weapon_ready_count",
+        "unit_health": "unit_health",
+        "unit_health_fraction": "unit_health_fraction",
+        "unit_health_ratio": "unit_health_fraction",
+        "unit_energy": "unit_energy",
+        "unit_order_count": "unit_order_count",
+        "orders": "unit_order_count",
+        "ability_available": "ability_available",
+        "ability_ready": "ability_available",
+        "unit_form": "unit_form_count",
+        "unit_form_count": "unit_form_count",
+        "location_visible": "location_visible",
+        "visible": "location_visible",
         "idle_producer": "producer_available",
         "producer_available": "producer_available",
         "cargo": "cargo_used",
@@ -3053,6 +3772,66 @@ def normalize_wait_condition(condition: str) -> str:
     if normalized not in aliases:
         raise StrategyParseError(f"unsupported wait-until condition: {condition}")
     return aliases[normalized]
+
+
+def normalize_comparison(comparison: str) -> str:
+    normalized = normalize_name(comparison)
+    aliases = {
+        "gte": "gte",
+        "ge": "gte",
+        "at_least": "gte",
+        "greater_than_or_equal": "gte",
+        "lte": "lte",
+        "le": "lte",
+        "at_most": "lte",
+        "less_than_or_equal": "lte",
+        "eq": "eq",
+        "equals": "eq",
+        "equal": "eq",
+        "neq": "neq",
+        "not_equal": "neq",
+        "gt": "gt",
+        "greater_than": "gt",
+        "lt": "lt",
+        "less_than": "lt",
+    }
+    try:
+        return aliases[normalized]
+    except KeyError as exc:
+        raise StrategyParseError(
+            f"unsupported condition comparison: {comparison}"
+        ) from exc
+
+
+def normalize_enemy_race(race: str) -> str:
+    normalized = normalize_name(race)
+    if normalized not in ENEMY_RACE_KEYS:
+        raise StrategyParseError(f"unsupported enemy race: {race}")
+    return normalized
+
+
+def normalize_alert(alert: str) -> str:
+    normalized = normalize_name(alert)
+    aliases = {
+        normalize_name(key).replace("_", ""): key for key in ALERT_KEYS
+    }
+    canonical = aliases.get(normalized.replace("_", ""))
+    if canonical is None:
+        raise StrategyParseError(f"unsupported game alert: {alert}")
+    return canonical
+
+
+def normalize_condition_actor(actor: str) -> str:
+    if not actor.strip():
+        raise StrategyParseError("condition target unit/actor is required")
+    return normalize_ability_actor(actor)
+
+
+def normalize_unit_form(form: str) -> str:
+    normalized = normalize_name(form)
+    if normalized not in UNIT_FORM_SPECS:
+        raise StrategyParseError(f"unsupported Terran runtime form: {form}")
+    return normalized
 
 
 def normalize_building(building: str) -> str:

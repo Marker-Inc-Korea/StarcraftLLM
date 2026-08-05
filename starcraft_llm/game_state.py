@@ -32,6 +32,7 @@ class UnitObservation:
     energy: float | None = None
     is_ready: bool | None = None
     is_flying: bool | None = None
+    is_cloaked: bool | None = None
     is_burrowed: bool | None = None
     is_loaded: bool | None = None
     is_idle: bool | None = None
@@ -79,6 +80,9 @@ class GameStateSummary:
     upgrades: tuple[str, ...] = ()
     unit_observations: tuple[UnitObservation, ...] = ()
     semantic_locations: dict[str, LocationSnapshot | None] = field(default_factory=dict)
+    enemy_race: str | None = None
+    map_name: str | None = None
+    active_alerts: tuple[str, ...] = ()
 
 
 def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
@@ -110,6 +114,12 @@ def game_state_summary_to_dict(summary: GameStateSummary) -> dict[str, Any]:
             key: _location_snapshot_to_dict(value) if value is not None else None
             for key, value in sorted(summary.semantic_locations.items())
         }
+    if summary.enemy_race is not None:
+        result["enemy_race"] = summary.enemy_race
+    if summary.map_name is not None:
+        result["map_name"] = summary.map_name
+    if summary.active_alerts:
+        result["active_alerts"] = list(summary.active_alerts)
     return result
 
 
@@ -131,6 +141,7 @@ def _unit_observation_to_dict(observation: UnitObservation) -> dict[str, Any]:
         "energy",
         "is_ready",
         "is_flying",
+        "is_cloaked",
         "is_burrowed",
         "is_loaded",
         "is_idle",
